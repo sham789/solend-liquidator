@@ -5771,18 +5771,35 @@ dependencies = [
  "serde_json",
  "sha3 0.10.1",
  "sodiumoxide",
+ "solana-account-decoder",
  "solana-clap-utils",
  "solana-cli-config",
  "solana-client",
  "solana-logger",
  "solana-program",
  "solana-sdk",
+ "solend-program",
  "spl-associated-token-account",
  "spl-token",
  "thiserror",
  "tokio",
+ "uint",
  "web3",
  "zeroize",
+]
+
+[[package]]
+name = "solend-program"
+version = "0.1.0"
+dependencies = [
+ "arrayref",
+ "bytemuck",
+ "num-derive",
+ "num-traits",
+ "solana-program",
+ "spl-token",
+ "thiserror",
+ "uint",
 ]
 
 [[package]]

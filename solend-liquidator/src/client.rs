@@ -13,87 +13,89 @@ use serde_json::Value;
 // use hmac::{Hmac, Mac};
 // use sha2::Sha256;
 use {
-  // clap::{
-  //     crate_description, crate_name, crate_version, value_t, App, AppSettings, Arg, ArgMatches,
-  //     SubCommand,
-  // },
-  solana_clap_utils::{
-      fee_payer::fee_payer_arg,
-      input_parsers::{keypair_of, pubkey_of, value_of},
-      input_validators::{is_amount, is_keypair, is_parsable, is_pubkey, is_url},
-      keypair::signer_from_path,
-  },
-  solana_client::nonblocking::rpc_client::RpcClient,
-  solana_program::{native_token::lamports_to_sol, program_pack::Pack, pubkey::Pubkey},
-  solana_sdk::{
-      commitment_config::CommitmentConfig,
-      signature::{Keypair, Signer},
-      system_instruction,
-      transaction::Transaction,
-  },
-  // solend_program::{
-  //     // self,
-  //     instruction::{init_lending_market, init_reserve, update_reserve_config},
-  //     math::WAD,
-  //     state::{LendingMarket, Reserve, ReserveConfig, ReserveFees},
-  // },
-  spl_token::{
-      amount_to_ui_amount,
-      instruction::{approve, revoke},
-      state::{Account as Token, Mint},
-      ui_amount_to_amount,
-  },
-  std::{borrow::Borrow, process::exit, str::FromStr},
-  system_instruction::create_account,
+    // clap::{
+    //     crate_description, crate_name, crate_version, value_t, App, AppSettings, Arg, ArgMatches,
+    //     SubCommand,
+    // },
+    solana_clap_utils::{
+        fee_payer::fee_payer_arg,
+        input_parsers::{keypair_of, pubkey_of, value_of},
+        input_validators::{is_amount, is_keypair, is_parsable, is_pubkey, is_url},
+        keypair::signer_from_path,
+    },
+    solana_client::nonblocking::rpc_client::RpcClient,
+    solana_client::rpc_config::RpcAccountInfoConfig,
+    solana_program::{native_token::lamports_to_sol, program_pack::Pack, pubkey::Pubkey},
+    solana_sdk::{
+        commitment_config::CommitmentConfig,
+        signature::{Keypair, Signer},
+        system_instruction,
+        transaction::Transaction,
+    },
+    // solend_program::{
+    //     // self,
+    //     instruction::{init_lending_market, init_reserve, update_reserve_config},
+    //     math::WAD,
+    //     state::{LendingMarket, Reserve, ReserveConfig, ReserveFees},
+    // },
+    spl_token::{
+        amount_to_ui_amount,
+        instruction::{approve, revoke},
+        state::{Account as Token, Mint},
+        ui_amount_to_amount,
+    },
+    std::{borrow::Borrow, process::exit, str::FromStr},
+    system_instruction::create_account,
 };
 
-use borsh::{BorshSerialize, BorshDeserialize};
-use pyth_sdk_solana;
+use borsh::{BorshDeserialize, BorshSerialize};
 use bs58;
+use pyth_sdk_solana;
+use solana_account_decoder::UiAccountEncoding;
+use solana_client::rpc_config::RpcProgramAccountsConfig;
+use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, MemcmpEncoding, RpcFilterType};
+use solend_program::state::Obligation;
 
-use crate::model::{self, SolendConfig, Oracles};
+use crate::model::{self, Oracles, SolendConfig};
 use crate::utils::body_to_string;
 
 pub struct Client {
-  client: HyperClient<HttpsConnector<hyper::client::HttpConnector>>,
-  config: Config,
-  solend_cfg: Option<&'static SolendConfig>,
+    client: HyperClient<HttpsConnector<hyper::client::HttpConnector>>,
+    config: Config,
+    solend_cfg: Option<&'static SolendConfig>,
 }
 
-
-
 pub struct Config {
-  rpc_client: RpcClient,
-  signer: Box<dyn Signer + Send + Sync>,
-  // lending_program_id: Pubkey,
-  // verbose: bool,
-  // dry_run: bool,
+    rpc_client: RpcClient,
+    signer: Box<dyn Signer + Send + Sync>,
+    // lending_program_id: Pubkey,
+    // verbose: bool,
+    // dry_run: bool,
 }
 
 pub fn get_config() -> Config {
-  let cli_config = solana_cli_config::Config  {
-    keypair_path: String::from("./private/liquidator_main.json"),
-    ..solana_cli_config::Config::default()
-  };
-  // let json_rpc_url = value_t!(matches, "json_rpc_url", String)
-  //     .unwrap_or_else(|_| cli_config.json_rpc_url.clone());
-  let json_rpc_url = String::from("https://broken-dawn-field.solana-mainnet.quiknode.pro/52908360084c7e0666532c96647b9b239ec5cadf/");
+    let cli_config = solana_cli_config::Config {
+        keypair_path: String::from("./private/liquidator_main.json"),
+        ..solana_cli_config::Config::default()
+    };
+    // let json_rpc_url = value_t!(matches, "json_rpc_url", String)
+    //     .unwrap_or_else(|_| cli_config.json_rpc_url.clone());
+    let json_rpc_url = String::from("https://broken-dawn-field.solana-mainnet.quiknode.pro/52908360084c7e0666532c96647b9b239ec5cadf/");
 
-  let signer = solana_sdk::signer::keypair::read_keypair_file(cli_config.keypair_path).unwrap();
+    let signer = solana_sdk::signer::keypair::read_keypair_file(cli_config.keypair_path).unwrap();
 
-  // let lending_program_id = pubkey_of(&matches, "lending_program_id").unwrap();
-  // let verbose = matches.is_present("verbose");
-  // let dry_run = matches.is_present("dry_run");
+    // let lending_program_id = pubkey_of(&matches, "lending_program_id").unwrap();
+    // let verbose = matches.is_present("verbose");
+    // let dry_run = matches.is_present("dry_run");
 
-  Config {
-      rpc_client: RpcClient::new_with_commitment(json_rpc_url, CommitmentConfig::confirmed()),
-      signer: Box::new(signer),
-      // lending_program_id,
-      // verbose,
-      // dry_run,
-  }
+    Config {
+        rpc_client: RpcClient::new_with_commitment(json_rpc_url, CommitmentConfig::confirmed()),
+        signer: Box::new(signer),
+        // lending_program_id,
+        // verbose,
+        // dry_run,
+    }
 }
-
 
 // #[derive(
 //   Copy,
@@ -160,15 +162,20 @@ pub fn get_config() -> Config {
 //   pub comp:           [pyth_sdk_solana::state::PriceComp; 32],
 // }
 
-
+#[derive(Debug, Clone)]
 pub struct OracleData {
-  pub symbol: String,
-  pub reserve_address: Pubkey,
-  pub mint_address: Pubkey,
-  pub decimals: u8,
-  pub price: pyth_sdk_solana::state::Price
+    pub symbol: String,
+    pub reserve_address: Pubkey,
+    pub mint_address: Pubkey,
+    pub decimals: i64,
+    pub price: pyth_sdk_solana::state::PriceFeed,
 }
 
+#[derive(Debug, Clone)]
+pub struct EnhancedObligation {
+  pub obligation: Obligation,
+  pub pubkey: Pubkey
+}
 
 impl Client {
     const CFG_PRESET: &'static str = "production";
@@ -177,7 +184,11 @@ impl Client {
         let client = HyperClient::builder().build::<_, Body>(HttpsConnector::new());
         let config = get_config();
 
-        Self { client, config, solend_cfg: None }
+        Self {
+            client,
+            config,
+            solend_cfg: None,
+        }
     }
 
     pub async fn get_solend_config(&self) -> SolendConfig {
@@ -201,164 +212,202 @@ impl Client {
         solend_cfg
     }
 
+    pub async fn get_token_oracle_data(
+        &self,
+        market_reserves: &Vec<model::Resef>,
+    ) -> Vec<OracleData> {
+        let solend_cfg = self.solend_cfg.unwrap();
 
-    pub async fn get_token_oracle_data(&self, market_reserves: &Vec<model::Resef>) -> Vec<OracleData> {
-      let solend_cfg = self.solend_cfg.unwrap();
-
-      let mut oracle_data_list = vec![];
-      for market_reserve in market_reserves {
-        if let Some(oracle_data) = self.get_oracle_data(market_reserve, &solend_cfg.oracles).await {
-          oracle_data_list.push(oracle_data);
+        let mut oracle_data_list = vec![];
+        for market_reserve in market_reserves {
+            if let Some(oracle_data) = self
+                .get_oracle_data(market_reserve, &solend_cfg.oracles)
+                .await
+            {
+                oracle_data_list.push(oracle_data);
+            }
         }
-      }
-      oracle_data_list
+        oracle_data_list
     }
-
 
     const NULL_ORACLE: &'static str = "nu11111111111111111111111111111111111111111";
     const SWITCHBOARD_V1_ADDRESS: &'static str = "DtmE9D2CSB4L5D6A15mraeEjrGMm6auWVzgaD8hK2tZM";
     const SWITCHBOARD_V2_ADDRESS: &'static str = "SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f";
 
-    async fn get_oracle_data(&self, reserve: &model::Resef, oracles: &Oracles) -> Option<OracleData> {
-      let oracle = {
-        let mut v = model::Asset2::default();
-        for oracle_asset in &oracles.assets {
-          if oracle_asset.asset == reserve.asset {
-            v = oracle_asset.clone();
-            break
-          }
-        }
-        v
-      };
-
-      let rpc: &RpcClient = &self.config.rpc_client;
-
-      // let price = 
-      let price = if !oracle.price_address.is_empty() && oracle.price_address != Self::NULL_ORACLE {
-        let price_public_key = Pubkey::from_str(oracle.price_address.as_str()).unwrap();
-        let mut result = rpc.get_account(&price_public_key).await.unwrap();
-
-        let result = pyth_sdk_solana::load_price_feed_from_account(
-          &price_public_key,
-          &mut result
-        ).unwrap();
-        // println!("res: {:?}", result);
-        Some(result)
-      } else {
-        None
-        // let price_public_key = Pubkey::from_str(oracle.switchboard_feed_address.as_str()).unwrap();
-        // let info = rpc.get_account(&price_public_key).await.unwrap();
-        // // const owner = info?.owner.toString();
-        // let owner = info.owner;
-
-        // if owner == Pubkey::from_str(Self::SWITCHBOARD_V1_ADDRESS).unwrap() {
-        //   // let result = 
-        // } else if owner == Pubkey::from_str(Self::SWITCHBOARD_V2_ADDRESS).unwrap() {
-
-        // }
-      };
-
-      let solend_cfg = self.solend_cfg.unwrap();
-
-
-      match price {
-        Some(price) => {
-          let asset_config = {
-            let mut v = model::Asset::default();
-            for oracle_asset in &solend_cfg.assets {
-              if oracle_asset.symbol == oracle.asset {
-                v = oracle_asset.clone();
-                break
-              }
+    async fn get_oracle_data(
+        &self,
+        reserve: &model::Resef,
+        oracles: &Oracles,
+    ) -> Option<OracleData> {
+        let oracle = {
+            let mut v = model::Asset2::default();
+            for oracle_asset in &oracles.assets {
+                if oracle_asset.asset == reserve.asset {
+                    v = oracle_asset.clone();
+                    break;
+                }
             }
             v
-          };
+        };
 
-          Some(OracleData {
-            // pub symbol: String,
-            // pub reserve_address: Pubkey,
-            // pub mint_address: Pubkey,
-            // pub decimals: u8,
-            // pub price: pyth_sdk_solana::state::Price
-            symbol: oracle.asset,
-            reserve_address: reserve.address,
-            mint_address: asset_config.mint_address,
-            decimals: 10usize.pow(asset_config.decimals),
-            price
-          })
-        },
-        None => None
-      }
+        let rpc: &RpcClient = &self.config.rpc_client;
 
+        // let price =
+        let price = if !oracle.price_address.is_empty() && oracle.price_address != Self::NULL_ORACLE
+        {
+            let price_public_key = Pubkey::from_str(oracle.price_address.as_str()).unwrap();
+            let mut result = rpc.get_account(&price_public_key).await.unwrap();
+
+            let result =
+                pyth_sdk_solana::load_price_feed_from_account(&price_public_key, &mut result)
+                    .unwrap();
+            // println!("res: {:?}", result);
+            Some(result)
+        } else {
+            None
+            // let price_public_key = Pubkey::from_str(oracle.switchboard_feed_address.as_str()).unwrap();
+            // let info = rpc.get_account(&price_public_key).await.unwrap();
+            // // const owner = info?.owner.toString();
+            // let owner = info.owner;
+
+            // if owner == Pubkey::from_str(Self::SWITCHBOARD_V1_ADDRESS).unwrap() {
+            //   // let result =
+            // } else if owner == Pubkey::from_str(Self::SWITCHBOARD_V2_ADDRESS).unwrap() {
+
+            // }
+        };
+
+        let solend_cfg = self.solend_cfg.unwrap();
+
+        match price {
+            Some(price) => {
+                let asset_config = {
+                    let mut v = model::Asset::default();
+                    for oracle_asset in &solend_cfg.assets {
+                        if oracle_asset.symbol == oracle.asset {
+                            v = oracle_asset.clone();
+                            break;
+                        }
+                    }
+                    v
+                };
+
+                Some(OracleData {
+                    // pub symbol: String,
+                    // pub reserve_address: Pubkey,
+                    // pub mint_address: Pubkey,
+                    // pub decimals: u8,
+                    // pub price: pyth_sdk_solana::state::Price
+                    symbol: oracle.asset,
+                    reserve_address: Pubkey::from_str(reserve.address.as_str()).unwrap(),
+                    mint_address: Pubkey::from_str(asset_config.mint_address.as_str()).unwrap(),
+                    decimals: 10i64.pow(asset_config.decimals as u32),
+                    price,
+                })
+            }
+            None => None,
+        }
     }
 
-    //   pub async fn orderbook(&self, market_name: &str) -> models::Response<models::Orderbook> {
-    //     let (signer, client) = (&self.signer, &self.client);
-    //     let lsize = 35;
-    //     let signature_res = signer.sign_req(
-    //         "GET",
-    //         format!("/markets/{:}/orderbook?depth={:}", market_name, lsize).as_str(),
-    //         None,
-    //     );
+    pub async fn get_obligations(&self, market_address: &str) -> Vec<EnhancedObligation> {
+        let rpc: &RpcClient = &self.config.rpc_client;
+        let solend_cfg = self.solend_cfg.unwrap();
 
-    //     let request = Request::builder()
-    //         .method(Method::GET)
-    //         .uri(format!(
-    //             "https://ftx.com/api/markets/{:}/orderbook?depth={:}",
-    //             market_name, lsize
-    //         ))
-    //         .header("Content-Type", "application/json")
-    //         .header("FTX-KEY", signature_res.api_key)
-    //         .header("FTX-SIGN", signature_res.signature)
-    //         .header("FTX-TS", signature_res.timestamp)
-    //         .body(signature_res.body)
-    //         .unwrap();
+        let program_id = Pubkey::from_str(solend_cfg.program_id.as_str()).unwrap();
+        let market_address = Pubkey::from_str(market_address).unwrap();
 
-    //     let res = client.request(request).await.unwrap();
+        let memcmp = RpcFilterType::Memcmp(Memcmp {
+            offset: 10,
+            bytes: MemcmpEncodedBytes::Bytes(market_address.to_bytes().to_vec()),
+            encoding: None,
+        });
 
-    //     let body = res.into_body();
-    //     let body_str = body_to_string(body).await;
+        let obligations_encoded = rpc.get_program_accounts_with_config(
+            &program_id,
+            RpcProgramAccountsConfig {
+                filters: Some(vec![
+                    // RpcFilterType::DataSize(128),
+                    memcmp,
+                    // export const OBLIGATION_LEN = 1300;
+                    RpcFilterType::DataSize(1300),
+                ]),
+                account_config: RpcAccountInfoConfig {
+                    encoding: Some(UiAccountEncoding::Base64),
+                    commitment: Some(rpc.commitment()),
+                    data_slice: None,
+                    min_context_slot: None,
+                },
+                with_context: None,
+            },
+        ).await;
 
-    //     let d_markets_response: models::Response<models::Orderbook> =
-    //         serde_json::from_str(&body_str).unwrap();
-    //     d_markets_response
-    // }
+        if obligations_encoded.is_err() {
+          panic!("none got");
+        }
+
+        let obligations_encoded = obligations_encoded.unwrap();
+
+        // let obligation = Obligation::unpack(&);
+
+        let mut obligations_list = vec![];
+
+        for obligation_encoded in &obligations_encoded {
+          let &(obl_pubkey, ref obl_account) = obligation_encoded;
+          let obligation = Obligation::unpack(&obl_account.data).unwrap();
+
+          obligations_list.push(
+            EnhancedObligation {
+              obligation,
+              pubkey: obl_pubkey
+            }
+          );
+        }
+
+        obligations_list
+        // println!("obligation: {:?}", resp);
+
+    }
 }
 
 async fn process_markets(
-  client: &Arc<Client>,
-  solend_cfg: &'static SolendConfig,
-  // runtime_cfg: &'static Config
+    client: &Arc<Client>,
+    solend_cfg: &'static SolendConfig,
+    // runtime_cfg: &'static Config
 ) {
+    // let markets_n = solend_cfg.markets.len();
+    let markets_n = 10;
+    let mut handles = vec![];
 
+    for i in 0..markets_n {
+        // let current_market: &'static _ = Box::leak(Box::new());
+        let current_market = solend_cfg.markets[i].clone();
 
-  let markets_n = solend_cfg.markets.len();
-  let mut handles = vec![];
+        let c_client = Arc::clone(&client);
+        let h = tokio::spawn(async move {
+            // current_market.
+            // let market_reserves = &current_market.reserves;
 
-  for i in 0..markets_n {
-    // let current_market: &'static _ = Box::leak(Box::new());
-    let current_market = solend_cfg.markets[i].clone();
-    
-    let c_client = Arc::clone(&client);
-    let h = tokio::spawn(async move {
+            let oracle_data = c_client
+                .get_token_oracle_data(&current_market.reserves)
+                .await;
+            let all_obligations = c_client
+                .get_obligations(current_market.address.as_str())
+                .await;
 
-      // current_market.
-      let market_reserves = &current_market.reserves;
+            // println!("obl: {:?}", all_obligations);
+            // process_one_market(
 
-      let response = c_client.get_token_oracle_data(market_reserves).await;
-      // process_one_market(
+            // );
+            // println!("resp: {:?}", response)
 
-      // );
-      println!("resp: {:?}", response)
+            // drop(current_market);
+        });
+        handles.push(h);
+    }
 
-      // drop(current_market);
-    });
-    handles.push(h);
-  }
-
-  for h in handles {
-    h.await.unwrap();
-  }
+    for h in handles {
+        h.await.unwrap();
+    }
 }
 
 // async fn process_one_market(
@@ -368,28 +417,29 @@ async fn process_markets(
 // }
 
 pub async fn run_liquidator() {
-  let mut solend_client = Client::new();
-  // let solend_client: &mut _ = Box::leak(Box::new(solend_client));
+    let mut solend_client = Client::new();
+    // let solend_client: &mut _ = Box::leak(Box::new(solend_client));
 
-  let solend_cfg = solend_client.get_solend_config().await;
-  let solend_cfg: &'static _ = Box::leak(Box::new(solend_cfg));
+    let solend_cfg = solend_client.get_solend_config().await;
+    let solend_cfg: &'static _ = Box::leak(Box::new(solend_cfg));
 
-  solend_client.solend_cfg = Some(solend_cfg);
+    solend_client.solend_cfg = Some(solend_cfg);
 
-  let c_solend_client = Arc::new(solend_client);
+    let c_solend_client = Arc::new(solend_client);
 
-  process_markets(
-    // client: &Arc<Client>,
-    // solend_cfg: &'static SolendConfig,
-    // runtime_cfg: &'static Config
-    &c_solend_client,
-    solend_cfg,
-  ).await;
-  // let runtime_cfg: &'static _ = Box::leak(Box::new(solend_client.get_config()));
+    process_markets(
+        // client: &Arc<Client>,
+        // solend_cfg: &'static SolendConfig,
+        // runtime_cfg: &'static Config
+        &c_solend_client,
+        solend_cfg,
+    )
+    .await;
+    // let runtime_cfg: &'static _ = Box::leak(Box::new(solend_client.get_config()));
 
-  // loop {
-    
-  // }
+    // loop {
 
-  drop(solend_cfg);
+    // }
+
+    drop(solend_cfg);
 }
