@@ -745,7 +745,10 @@ pub fn calculate_refreshed_obligation(
 
         // export const WAD = new BigNumber(1000000000000000000);
         let collateral_exchange_rate = reserve.inner.collateral_exchange_rate().unwrap();
-        println!("(d) collateral exchange rate: {:?}", collateral_exchange_rate);
+        println!(
+            "(d) collateral exchange rate: {:?}",
+            collateral_exchange_rate
+        );
 
         let market_value = U256::from(deposit.deposited_amount)
             .mul(wad())
@@ -872,8 +875,8 @@ pub fn calculate_refreshed_obligation(
         // let market_value = U256::from_big_endian(bytes_baw.as_slice());
         let mut market_value = U256::from(0u32);
         decimal_to_u256(
-          &Decimal(borrow_amount_wads_with_interest * price / decimals),
-          &mut market_value,
+            &Decimal(borrow_amount_wads_with_interest * price / decimals),
+            &mut market_value,
         );
         println!("(b) market_value: {:?}", market_value);
 
@@ -931,40 +934,35 @@ pub fn calculate_refreshed_obligation(
 }
 
 pub fn decimal_to_u256(decimal: &Decimal, dest: &mut U256) {
-  let mut bytes_baw = [0u8; 8 * 3];
-  decimal.0.to_little_endian(&mut bytes_baw);
-  let de = 1e18 as u128;
-  let r = U256::from_little_endian(bytes_baw.as_slice()) / U256::from(de);
-  *dest = r;
+    let mut bytes_baw = [0u8; 8 * 3];
+    decimal.0.to_little_endian(&mut bytes_baw);
+    let de = 1e18 as u128;
+    let r = U256::from_little_endian(bytes_baw.as_slice()) / U256::from(de);
+    *dest = r;
 }
 
 #[test]
 fn test_decimal_to_u256() {
+    let test_cases: Vec<u128> = vec![
+        85345,
+        0,
+        92358347573475734753727457,
+        285,
+        3,
+        93674,
+        12958324752374577235712,
+        3945873256,
+    ];
 
-  let test_cases: Vec<u128> = vec![
-    85345,
-    0,
-    92358347573475734753727457,
-    285,
-    3,
-    93674,
-    12958324752374577235712,
-    3945873256
-  ];
+    for internal_base in test_cases {
+        let decimal = Decimal::from(internal_base);
+        let mut dest_u256 = U256::from(0u32);
 
-  for internal_base in test_cases {
-    let decimal = Decimal::from(internal_base);
-    let mut dest_u256 = U256::from(0u32);
+        decimal_to_u256(&decimal, &mut dest_u256);
 
-    decimal_to_u256(&decimal, &mut dest_u256);
-
-    assert_eq!(
-      U256::from(internal_base),
-      dest_u256
-    )
-  }
+        assert_eq!(U256::from(internal_base), dest_u256)
+    }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct WalletBalanceData {
@@ -998,9 +996,8 @@ async fn get_wallet_token_data(
     }
 }
 
-async fn process_markets(
-    client: Arc<Client>,
-) {
+async fn process_markets(client: Arc<Client>) {
+    let solend_cfg = client.solend_cfg.unwrap();
     let markets_n = solend_cfg.markets.len();
     let mut handles = vec![];
 
@@ -1009,140 +1006,159 @@ async fn process_markets(
     for i in 0..markets_n {
         let current_market = solend_cfg.markets[i].clone();
 
-        let c_client = Arc::clone(&client);
+        let c_client = Arc::clone(&client);s
         let h = tokio::spawn(async move {
-            let lending_market = current_market.address.as_str();
+            let lending_market = current_market.address.clone();
 
             let (oracle_data, all_obligations, reserves) = tokio::join!(
                 c_client.get_token_oracle_data(&current_market.reserves),
-                c_client.get_obligations(lending_market),
-                c_client.get_reserves(lending_market),
+                c_client.get_obligations(lending_market.as_str()),
+                c_client.get_reserves(lending_market.as_str()),
             );
 
+            let mut inner_handles = vec![];
+
             for obligation in &all_obligations {
-                let refreshed_obligation = calculate_refreshed_obligation(
-                    // obligation: &Obligation,
-                    // all_reserves: &Vec<Enhanced<Reserve>>,
-                    // tokens_oracle: &Vec<OracleData>,
-                    &obligation.inner,
-                    &reserves,
-                    &oracle_data,
-                );
+                let oracle_data = oracle_data.clone();
+                let c_client = Arc::clone(&c_client);
+                let obligation = obligation.clone();
+                let current_market = current_market.clone();
+                let lending_market = lending_market.clone();
+                let reserves = reserves.clone();
 
-                if refreshed_obligation.is_none() {
-                    continue;
-                }
-
-                let refreshed_obligation = refreshed_obligation.unwrap();
-                let (borrowed_value, unhealthy_borrow_value, deposits, borrows) = (
-                    refreshed_obligation.borrowed_value,
-                    refreshed_obligation.unhealthy_borrow_value,
-                    refreshed_obligation.deposits,
-                    refreshed_obligation.borrows,
-                );
-
-                // let (borrowed)
-
-                if borrowed_value <= unhealthy_borrow_value {
-                    println!("do nothing if obligation is healthy");
-                    break;
-                }
-
-                // select repay token that has the highest market value
-                let selected_borrow = {
-                    let mut v: Option<Borrow> = None;
-                    for borrow in borrows {
-                        // if v.is_none() || deposit.market_value >= v.unwrap().market_value
-                        match v {
-                            Some(ref real_v) => {
-                                if borrow.market_value >= real_v.market_value {
-                                    v = Some(borrow);
-                                }
-                            }
-                            None => v = Some(borrow),
-                        }
-                    }
-                    v
-                };
-
-                // select the withdrawal collateral token with the highest market value
-                let selected_deposit = {
-                    let mut v: Option<Deposit> = None;
-                    for deposit in deposits {
-                        // if v.is_none() || deposit.market_value >= v.unwrap().market_value
-                        match v {
-                            Some(ref real_v) => {
-                                if deposit.market_value >= real_v.market_value {
-                                    v = Some(deposit);
-                                }
-                            }
-                            None => v = Some(deposit),
-                        }
-                    }
-                    v
-                };
-
-                if selected_deposit.is_none() || selected_borrow.is_none() {
-                    println!("skip toxic obligations caused by toxic oracle data");
-                    break;
-                }
-                let selected_deposit = selected_deposit.unwrap();
-                let selected_borrow = selected_borrow.unwrap();
-
-                println!(
-                    "obligation: {:} is underwater",
-                    obligation.pubkey.to_string()
-                );
-                println!("borrowed_value: {:} ", borrowed_value.to_string());
-                println!(
-                    "unhealthy_borrow_value: {:} ",
-                    unhealthy_borrow_value.to_string()
-                );
-                println!("market addr: {:} ", lending_market);
-
-                let wallet_address = c_client.config.signer.pubkey();
-                let retrieved_wallet_data = get_wallet_token_data(
-                    &c_client,
-                    wallet_address,
-                    selected_borrow.mint_address,
-                    selected_borrow.symbol.clone(),
-                )
-                .await
-                .unwrap();
-
-                println!("retrieved_wallet_data: {:?}", retrieved_wallet_data);
-
-                let u_zero = U256::from(0);
-                if retrieved_wallet_data.balance == u_zero {
-                    println!(
-                        "insufficient {:} to liquidate obligation {:} in market: {:}",
-                        selected_borrow.symbol,
-                        obligation.pubkey.to_string(),
-                        lending_market
+                let h = tokio::spawn(async move {
+                    let refreshed_obligation = calculate_refreshed_obligation(
+                        // obligation: &Obligation,
+                        // all_reserves: &Vec<Enhanced<Reserve>>,
+                        // tokens_oracle: &Vec<OracleData>,
+                        &obligation.inner,
+                        &reserves,
+                        &oracle_data,
                     );
-                    break;
-                } else if retrieved_wallet_data.balance < u_zero {
-                    println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market);
-                    println!("potentially network error or token account does not exist in wallet");
-                    break;
-                }
 
-                c_client
-                    .liquidate_and_redeem(
-                        &retrieved_wallet_data,
-                        selected_borrow.symbol,
-                        selected_deposit.symbol,
-                        current_market.clone(),
-                        obligation,
+                    if refreshed_obligation.is_none() {
+                        return;
+                    }
+
+                    let refreshed_obligation = refreshed_obligation.unwrap();
+                    let (borrowed_value, unhealthy_borrow_value, deposits, borrows) = (
+                        refreshed_obligation.borrowed_value,
+                        refreshed_obligation.unhealthy_borrow_value,
+                        refreshed_obligation.deposits,
+                        refreshed_obligation.borrows,
+                    );
+
+                    // let (borrowed)
+
+                    if borrowed_value <= unhealthy_borrow_value {
+                        println!("do nothing if obligation is healthy");
+                        return;
+                    }
+
+                    // select repay token that has the highest market value
+                    let selected_borrow = {
+                        let mut v: Option<Borrow> = None;
+                        for borrow in borrows {
+                            // if v.is_none() || deposit.market_value >= v.unwrap().market_value
+                            match v {
+                                Some(ref real_v) => {
+                                    if borrow.market_value >= real_v.market_value {
+                                        v = Some(borrow);
+                                    }
+                                }
+                                None => v = Some(borrow),
+                            }
+                        }
+                        v
+                    };
+
+                    // select the withdrawal collateral token with the highest market value
+                    let selected_deposit = {
+                        let mut v: Option<Deposit> = None;
+                        for deposit in deposits {
+                            // if v.is_none() || deposit.market_value >= v.unwrap().market_value
+                            match v {
+                                Some(ref real_v) => {
+                                    if deposit.market_value >= real_v.market_value {
+                                        v = Some(deposit);
+                                    }
+                                }
+                                None => v = Some(deposit),
+                            }
+                        }
+                        v
+                    };
+
+                    if selected_deposit.is_none() || selected_borrow.is_none() {
+                        println!("skip toxic obligations caused by toxic oracle data");
+                        return;
+                    }
+                    let selected_deposit = selected_deposit.unwrap();
+                    let selected_borrow = selected_borrow.unwrap();
+
+                    println!(
+                        "obligation: {:} is underwater",
+                        obligation.pubkey.to_string()
+                    );
+                    println!("borrowed_value: {:} ", borrowed_value.to_string());
+                    println!(
+                        "unhealthy_borrow_value: {:} ",
+                        unhealthy_borrow_value.to_string()
+                    );
+                    println!("market addr: {:} ", lending_market);
+
+                    let wallet_address = c_client.config.signer.pubkey();
+                    let retrieved_wallet_data = get_wallet_token_data(
+                        &c_client,
+                        wallet_address,
+                        selected_borrow.mint_address,
+                        selected_borrow.symbol.clone(),
                     )
-                    .await;
+                    .await
+                    .unwrap();
+
+                    println!("retrieved_wallet_data: {:?}", retrieved_wallet_data);
+
+                    let u_zero = U256::from(0);
+                    if retrieved_wallet_data.balance == u_zero {
+                        println!(
+                            "insufficient {:} to liquidate obligation {:} in market: {:}",
+                            selected_borrow.symbol,
+                            obligation.pubkey.to_string(),
+                            lending_market
+                        );
+                        return;
+                    } else if retrieved_wallet_data.balance < u_zero {
+                        println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market);
+                        println!(
+                            "potentially network error or token account does not exist in wallet"
+                        );
+                        return;
+                    }
+
+                    c_client
+                        .liquidate_and_redeem(
+                            &retrieved_wallet_data,
+                            selected_borrow.symbol,
+                            selected_deposit.symbol,
+                            current_market.clone(),
+                            &obligation,
+                        )
+                        .await;
+                });
+
+                inner_handles.push(h);
+            }
+
+            for inner_h in inner_handles {
+                inner_h.await;
             }
         });
         handles.push(h);
     }
 
     for h in handles {
-        h.await.unwrap();
+        h.await;
     }
 }
 
@@ -1157,10 +1173,10 @@ pub async fn run_liquidator() {
 
     let c_solend_client = Arc::new(solend_client);
 
-    process_markets(
-        c_solend_client,
-    )
-    .await;
+    loop {
+      let c_solend_client = Arc::clone(&c_solend_client);
+      process_markets(c_solend_client).await;
+    }
 
     drop(solend_cfg);
 }
