@@ -3,6 +3,12 @@
 
 # production
 /build
+**/build
 
 # misc
 id.json
+
+**/.git
+.git/
+**/target
+target/

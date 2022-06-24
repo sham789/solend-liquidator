@@ -1006,7 +1006,7 @@ async fn process_markets(client: Arc<Client>) {
     for i in 0..markets_n {
         let current_market = solend_cfg.markets[i].clone();
 
-        let c_client = Arc::clone(&client);s
+        let c_client = Arc::clone(&client);
         let h = tokio::spawn(async move {
             let lending_market = current_market.address.clone();
 

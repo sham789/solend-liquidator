@@ -1,0 +1,21 @@
+[package]
+edition = "2018"
+name = "switchboard-program"
+version = "0.2.1"
+authors = ["Mitchell Gildenberg <mitch@switchboard.xyz>"]
+description = "A Rust library to interact with Switchboard data feeds."
+readme = "README.md"
+keywords = ["switchboard", "oracle", "solana"]
+homepage = "https://switchboard.xyz"
+license = "MIT"
+documentation = "https://docs.rs/switchboard-program/"
+
+[dependencies]
+bincode = "^1.3.1"
+borsh = "0.9.0"
+byteorder = "^1.3.4"
+quick-protobuf = "=0.8.0"
+solana-program = "=1.10.26"
+switchboard-protos = "0.1.58"
+switchboard-utils = "0.2.1"
+bytemuck = "1.7.3"
