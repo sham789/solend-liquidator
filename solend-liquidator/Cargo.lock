@@ -5978,6 +5978,8 @@ dependencies = [
  "solend-program",
  "spl-associated-token-account",
  "spl-token",
+ "switchboard-program",
+ "switchboard-v2",
  "thiserror",
  "tokio",
  "uint",

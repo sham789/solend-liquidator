@@ -1,6 +1,5 @@
 use hyper::Body;
 
-use web3::types::U256;
 // use rustc_hex::{FromHex, ToHex};
 // use tiny_keccak::{Hasher, Keccak};
 

@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::ops::{Add, Div, Mul};
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use bigdecimal::num_traits::Pow;
 use hyper::Body;
@@ -9,8 +8,7 @@ use hyper::Body;
 use hyper::{Client as HyperClient, Method, Request};
 use hyper_tls::HttpsConnector;
 
-use serde_derive::{Deserialize, Serialize};
-use serde_json::Value;
+use borsh::{BorshDeserialize, BorshSerialize};
 
 // use hmac::{Hmac, Mac};
 // use sha2::Sha256;
@@ -19,47 +17,23 @@ use {
     //     crate_description, crate_name, crate_version, value_t, App, AppSettings, Arg, ArgMatches,
     //     SubCommand,
     // },
-    solana_clap_utils::{
-        fee_payer::fee_payer_arg,
-        input_parsers::{keypair_of, pubkey_of, value_of},
-        input_validators::{is_amount, is_keypair, is_parsable, is_pubkey, is_url},
-        keypair::signer_from_path,
-    },
     solana_client::nonblocking::rpc_client::RpcClient,
     solana_client::rpc_config::RpcAccountInfoConfig,
-    solana_program::{native_token::lamports_to_sol, program_pack::Pack, pubkey::Pubkey},
+    solana_program::{program_pack::Pack, pubkey::Pubkey},
     solana_sdk::{
         commitment_config::CommitmentConfig,
         signature::{Keypair, Signer},
-        system_instruction,
         transaction::Transaction,
     },
-    // solend_program::{
-    //     // self,
-    //     instruction::{init_lending_market, init_reserve, update_reserve_config},
-    //     math::WAD,
-    //     state::{LendingMarket, Reserve, ReserveConfig, ReserveFees},
-    // },
-    spl_token::{
-        amount_to_ui_amount,
-        instruction::{approve, revoke},
-        state::{Account as Token, Mint},
-        ui_amount_to_amount,
-    },
-    std::{process::exit, str::FromStr},
-    system_instruction::create_account,
+    std::str::FromStr,
 };
 
-use lazy_static;
-
-use borsh::{BorshDeserialize, BorshSerialize};
-use bs58;
 use pyth_sdk_solana;
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
-use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, MemcmpEncoding, RpcFilterType};
+use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
 use solana_program::instruction::Instruction;
-use solana_sdk::signers::Signers;
+
 use solend_program::instruction::{
     liquidate_obligation_and_redeem_reserve_collateral, refresh_obligation, refresh_reserve,
 };
@@ -67,7 +41,10 @@ use solend_program::math::{Decimal, Rate};
 use solend_program::state::{Obligation, Reserve};
 use spl_associated_token_account::get_associated_token_address;
 use spl_associated_token_account::instruction::create_associated_token_account;
+use switchboard_program::AggregatorState;
 use uint::construct_uint;
+
+// use switchboard_program::switchboard_protos::protos::aggregator_state::AggregatorState;
 
 use crate::model::{self, Asset, Market, Oracles, SolendConfig};
 use crate::utils::body_to_string;
@@ -188,13 +165,22 @@ pub struct OracleData {
     pub reserve_address: Pubkey,
     pub mint_address: Pubkey,
     pub decimals: i64,
-    pub price: pyth_sdk_solana::state::PriceFeed,
+    pub price: U256, // pub price: pyth_sdk_solana::state::PriceFeed,
 }
 
 #[derive(Debug, Clone)]
 pub struct Enhanced<T: Clone> {
     pub inner: T,
     pub pubkey: Pubkey,
+}
+
+lazy_static::lazy_static! {
+    static ref SWITCHBOARD_V1_ADDRESS: Pubkey =
+        Pubkey::from_str("DtmE9D2CSB4L5D6A15mraeEjrGMm6auWVzgaD8hK2tZM").unwrap();
+    static ref SWITCHBOARD_V2_ADDRESS: Pubkey =
+        Pubkey::from_str("SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f").unwrap();
+    static ref NULL_ORACLE: Pubkey =
+        Pubkey::from_str("nu11111111111111111111111111111111111111111").unwrap();
 }
 
 impl Client {
@@ -250,9 +236,9 @@ impl Client {
         oracle_data_list
     }
 
-    const NULL_ORACLE: &'static str = "nu11111111111111111111111111111111111111111";
-    const SWITCHBOARD_V1_ADDRESS: &'static str = "DtmE9D2CSB4L5D6A15mraeEjrGMm6auWVzgaD8hK2tZM";
-    const SWITCHBOARD_V2_ADDRESS: &'static str = "SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f";
+    // const NULL_ORACLE: &'static str = "nu11111111111111111111111111111111111111111";
+    // const SWITCHBOARD_V1_ADDRESS: &'static str = "DtmE9D2CSB4L5D6A15mraeEjrGMm6auWVzgaD8hK2tZM";
+    // const SWITCHBOARD_V2_ADDRESS: &'static str = "SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f";
 
     async fn get_oracle_data(
         &self,
@@ -273,7 +259,7 @@ impl Client {
         let rpc: &RpcClient = &self.config.rpc_client;
 
         // let price =
-        let price = if !oracle.price_address.is_empty() && oracle.price_address != Self::NULL_ORACLE
+        let price = if !oracle.price_address.is_empty() && Pubkey::from_str(oracle.price_address.as_str()).unwrap() != *NULL_ORACLE
         {
             let price_public_key = Pubkey::from_str(oracle.price_address.as_str()).unwrap();
             let mut result = rpc.get_account(&price_public_key).await.unwrap();
@@ -281,36 +267,52 @@ impl Client {
             let result =
                 pyth_sdk_solana::load_price_feed_from_account(&price_public_key, &mut result)
                     .unwrap();
-            // println!("res: {:?}", result);
-            Some(result)
+
+            println!(
+                "oracle: 1st case: {:?}",
+                result.get_current_price_unchecked().price
+            );
+            Some(U256::from(result.get_current_price_unchecked().price))
         } else {
-            None
-            // let price_public_key = Pubkey::from_str(oracle.switchboard_feed_address.as_str()).unwrap();
-            // let info = rpc.get_account(&price_public_key).await.unwrap();
-            // // const owner = info?.owner.toString();
-            // let owner = info.owner;
+            let price_public_key =
+                Pubkey::from_str(oracle.switchboard_feed_address.as_str()).unwrap();
+            let info = rpc.get_account(&price_public_key).await.unwrap();
+            let owner = info.owner;
 
-            // if owner == Pubkey::from_str(Self::SWITCHBOARD_V1_ADDRESS).unwrap() {
-            //   // let result =
-            // } else if owner == Pubkey::from_str(Self::SWITCHBOARD_V2_ADDRESS).unwrap() {
+            let result = AggregatorState::try_from_slice(info.data.as_slice()).unwrap();
 
-            // }
+            if owner == *SWITCHBOARD_V1_ADDRESS {
+                println!(
+                    "oracle: 2nd case: {:?}",
+                    result.last_round_result.as_ref().unwrap().result.unwrap() as i64
+                );
+
+                Some(U256::from(
+                    result.last_round_result.unwrap().result.unwrap() as i64,
+                ))
+            } else if owner == *SWITCHBOARD_V2_ADDRESS {
+                let retrieved = switchboard_program::get_aggregator_result(&result);
+
+                match retrieved {
+                    Ok(v) => {
+                        println!("oracle: 3rd case: {:?}", v.result.as_ref().unwrap());
+                        Some(U256::from(v.result.unwrap() as i64))
+                    }
+
+                    Err(_) => None,
+                }
+            } else {
+                println!("oracle: unrecognized switchboard owner address: {:}", owner);
+                None
+            }
         };
 
         let solend_cfg = self.solend_cfg.unwrap();
 
         match price {
             Some(price) => {
-                let asset_config = {
-                    let mut v = model::Asset::default();
-                    for oracle_asset in &solend_cfg.assets {
-                        if oracle_asset.symbol == oracle.asset {
-                            v = oracle_asset.clone();
-                            break;
-                        }
-                    }
-                    v
-                };
+                let asset_config =
+                    Self::find_where(&solend_cfg.assets, |x| x.symbol == oracle.asset);
 
                 Some(OracleData {
                     // pub symbol: String,
@@ -531,7 +533,7 @@ impl Client {
             Self::get_token_info(&solend_cfg.assets, repay_token_symbol.as_str());
 
         // get account that will be repaying the reserve liquidity
-        let repay_account = get_associated_token_address(
+        let _repay_account = get_associated_token_address(
             &payer_pubkey,
             &Pubkey::from_str(repay_token_info.mint_address.as_str()).unwrap(),
         );
@@ -731,7 +733,7 @@ pub fn calculate_refreshed_obligation(
         let token_oracle = &tokens_oracle[token_oracle];
 
         let (price, decimals, symbol) = (
-            token_oracle.price.get_current_price_unchecked().price,
+            token_oracle.price,
             token_oracle.decimals,
             token_oracle.symbol.clone(),
         );
@@ -799,7 +801,7 @@ pub fn calculate_refreshed_obligation(
         let token_oracle = &tokens_oracle[token_oracle];
 
         let (price, decimals, symbol, mint_address) = (
-            token_oracle.price.get_current_price_unchecked().price,
+            token_oracle.price,
             token_oracle.decimals,
             token_oracle.symbol.clone(),
             token_oracle.mint_address,
@@ -838,7 +840,7 @@ pub fn calculate_refreshed_obligation(
             obligationBorrowAmountWads: BigNumber,
 
         */
-        let borrow_amount_wads_with_interest = {
+        let borrow_amount_wads_with_interest_u192 = {
             match reserve_cumulative_borrow_rate_wads
                 .0
                 .cmp(&obligation_cumulative_borrow_rate_wads.0)
@@ -863,21 +865,17 @@ pub fn calculate_refreshed_obligation(
         };
         println!(
             "(b) borrow_amount_wads_with_interest: {:?}",
-            borrow_amount_wads_with_interest
+            borrow_amount_wads_with_interest_u192
         );
 
-        // let sm_market_value = borrow_amount_wads_with_interest * price / decimals;
-        // println!("(b) market_value: {:?}", sm_market_value);
+        let mut borrow_amount_wads_with_interest = U256::from(0u32);
 
-        // type cast from U192 to U256
-        // let mut bytes_baw: Vec<u8> = Vec::with_capacity(3 * 64);
-        // market_value.to_big_endian(&mut bytes_baw);
-        // let market_value = U256::from_big_endian(bytes_baw.as_slice());
-        let mut market_value = U256::from(0u32);
         decimal_to_u256(
-            &Decimal(borrow_amount_wads_with_interest * price / decimals),
-            &mut market_value,
+            &Decimal(borrow_amount_wads_with_interest_u192),
+            &mut borrow_amount_wads_with_interest,
         );
+
+        let market_value = borrow_amount_wads_with_interest * price / decimals;
         println!("(b) market_value: {:?}", market_value);
 
         borrowed_value = borrowed_value + market_value;
@@ -952,6 +950,7 @@ fn test_decimal_to_u256() {
         93674,
         12958324752374577235712,
         3945873256,
+        857345777777777777777777,
     ];
 
     for internal_base in test_cases {
@@ -1047,8 +1046,6 @@ async fn process_markets(client: Arc<Client>) {
                         refreshed_obligation.deposits,
                         refreshed_obligation.borrows,
                     );
-
-                    // let (borrowed)
 
                     if borrowed_value <= unhealthy_borrow_value {
                         println!("do nothing if obligation is healthy");
@@ -1151,7 +1148,7 @@ async fn process_markets(client: Arc<Client>) {
             }
 
             for inner_h in inner_handles {
-                inner_h.await;
+                inner_h.await.unwrap();
             }
         });
         handles.push(h);
@@ -1174,8 +1171,8 @@ pub async fn run_liquidator() {
     let c_solend_client = Arc::new(solend_client);
 
     loop {
-      let c_solend_client = Arc::clone(&c_solend_client);
-      process_markets(c_solend_client).await;
+        let c_solend_client = Arc::clone(&c_solend_client);
+        process_markets(c_solend_client).await;
     }
 
     drop(solend_cfg);
