@@ -2,13 +2,12 @@ use std::collections::HashSet;
 use std::ops::{Add, Div, Mul};
 use std::sync::Arc;
 
-use bigdecimal::num_traits::Pow;
 use hyper::Body;
 
 use hyper::{Client as HyperClient, Method, Request};
 use hyper_tls::HttpsConnector;
 
-use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::BorshDeserialize;
 
 use {
     solana_client::nonblocking::rpc_client::RpcClient,
@@ -26,7 +25,6 @@ use pyth_sdk_solana;
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
 use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
-use solana_program::account_info::AccountInfo;
 use solana_program::instruction::Instruction;
 
 use solana_sdk::account::create_is_signer_account_infos;
@@ -212,8 +210,8 @@ impl Client {
                 ))
             } else if owner == *SWITCHBOARD_V2_ADDRESS {
                 let mut info = info.clone();
-                let mut inner_accs = vec![(&price_public_key, false, &mut info)];
-                let mut inner_accs = Box::leak(Box::new(inner_accs));
+                let inner_accs = vec![(&price_public_key, false, &mut info)];
+                let inner_accs = Box::leak(Box::new(inner_accs));
 
                 let info = create_is_signer_account_infos(&mut (*inner_accs));
                 let result = switchboard_v2::AggregatorAccountData::new(&info[0]).unwrap();

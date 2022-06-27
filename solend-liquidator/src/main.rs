@@ -2,7 +2,7 @@ mod client;
 mod model;
 mod utils;
 
-use crate::client::{run_eternal_liquidator, run_liquidator_iter};
+use crate::client::run_eternal_liquidator;
 
 #[tokio::main]
 async fn main() {
