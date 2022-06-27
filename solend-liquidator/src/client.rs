@@ -10,13 +10,7 @@ use hyper_tls::HttpsConnector;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-// use hmac::{Hmac, Mac};
-// use sha2::Sha256;
 use {
-    // clap::{
-    //     crate_description, crate_name, crate_version, value_t, App, AppSettings, Arg, ArgMatches,
-    //     SubCommand,
-    // },
     solana_client::nonblocking::rpc_client::RpcClient,
     solana_client::rpc_config::RpcAccountInfoConfig,
     solana_program::{program_pack::Pack, pubkey::Pubkey},
@@ -32,8 +26,10 @@ use pyth_sdk_solana;
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
 use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
+use solana_program::account_info::AccountInfo;
 use solana_program::instruction::Instruction;
 
+use solana_sdk::account::create_is_signer_account_infos;
 use solend_program::instruction::{
     liquidate_obligation_and_redeem_reserve_collateral, refresh_obligation, refresh_reserve,
 };
@@ -59,15 +55,9 @@ pub struct Client {
     solend_cfg: Option<&'static SolendConfig>,
 }
 
-// unsafe impl Sync for Signer {}
-// unsafe impl Send for Signer {}
-
 pub struct Config {
     rpc_client: RpcClient,
     signer: Box<Keypair>,
-    // lending_program_id: Pubkey,
-    // verbose: bool,
-    // dry_run: bool,
 }
 
 pub fn get_config() -> Config {
@@ -75,15 +65,10 @@ pub fn get_config() -> Config {
         keypair_path: String::from("./private/liquidator_main.json"),
         ..solana_cli_config::Config::default()
     };
-    // let json_rpc_url = value_t!(matches, "json_rpc_url", String)
-    //     .unwrap_or_else(|_| cli_config.json_rpc_url.clone());
+
     let json_rpc_url = String::from("https://broken-dawn-field.solana-mainnet.quiknode.pro/52908360084c7e0666532c96647b9b239ec5cadf/");
 
     let signer = solana_sdk::signer::keypair::read_keypair_file(cli_config.keypair_path).unwrap();
-
-    // let lending_program_id = pubkey_of(&matches, "lending_program_id").unwrap();
-    // let verbose = matches.is_present("verbose");
-    // let dry_run = matches.is_present("dry_run");
 
     Config {
         rpc_client: RpcClient::new_with_commitment(json_rpc_url, CommitmentConfig::confirmed()),
@@ -93,71 +78,6 @@ pub fn get_config() -> Config {
         // dry_run,
     }
 }
-
-// #[derive(
-//   Copy,
-//   Clone,
-//   Debug,
-//   Default,
-//   PartialEq,
-//   Eq,
-//   BorshSerialize,
-//   BorshDeserialize,
-// )]
-// #[repr(C)]
-// // pub struct WrappedPriceAccount(pyth_sdk_solana::state::PriceAccount);
-// pub struct WrappedPriceAccount {
-//   /// pyth magic number
-//   pub magic:          u32,
-//   /// program version
-//   pub ver:            u32,
-//   /// account type
-//   pub atype:          u32,
-//   /// price account size
-//   pub size:           u32,
-//   /// price or calculation type
-//   pub ptype:          pyth_sdk_solana::state::PriceType,
-//   /// price exponent
-//   pub expo:           i32,
-//   /// number of component prices
-//   pub num:            u32,
-//   /// number of quoters that make up aggregate
-//   pub num_qt:         u32,
-//   /// slot of last valid (not unknown) aggregate price
-//   pub last_slot:      u64,
-//   /// valid slot-time of agg. price
-//   pub valid_slot:     u64,
-//   /// exponentially moving average price
-//   pub ema_price:      pyth_sdk_solana::state::Rational,
-//   /// exponentially moving average confidence interval
-//   pub ema_conf:       pyth_sdk_solana::state::Rational,
-//   /// unix timestamp of aggregate price
-//   pub timestamp:      i64,
-//   /// min publishers for valid price
-//   pub min_pub:        u8,
-//   /// space for future derived values
-//   pub drv2:           u8,
-//   /// space for future derived values
-//   pub drv3:           u16,
-//   /// space for future derived values
-//   pub drv4:           u32,
-//   /// product account key
-//   pub prod:           pyth_sdk_solana::state::AccKey,
-//   /// next Price account in linked list
-//   pub next:           pyth_sdk_solana::state::AccKey,
-//   /// valid slot of previous update
-//   pub prev_slot:      u64,
-//   /// aggregate price of previous update with TRADING status
-//   pub prev_price:     i64,
-//   /// confidence interval of previous update with TRADING status
-//   pub prev_conf:      u64,
-//   /// unix timestamp of previous aggregate with TRADING status
-//   pub prev_timestamp: i64,
-//   /// aggregate price info
-//   pub agg:            pyth_sdk_solana::state::PriceInfo,
-//   /// price components one per quoter
-//   pub comp:           [pyth_sdk_solana::state::PriceComp; 32],
-// }
 
 #[derive(Debug, Clone)]
 pub struct OracleData {
@@ -259,7 +179,8 @@ impl Client {
         let rpc: &RpcClient = &self.config.rpc_client;
 
         // let price =
-        let price = if !oracle.price_address.is_empty() && Pubkey::from_str(oracle.price_address.as_str()).unwrap() != *NULL_ORACLE
+        let price = if !oracle.price_address.is_empty()
+            && Pubkey::from_str(oracle.price_address.as_str()).unwrap() != *NULL_ORACLE
         {
             let price_public_key = Pubkey::from_str(oracle.price_address.as_str()).unwrap();
             let mut result = rpc.get_account(&price_public_key).await.unwrap();
@@ -269,7 +190,7 @@ impl Client {
                     .unwrap();
 
             println!(
-                "oracle: 1st case: {:?}",
+                "🎱 oracle: 1st case: {:?}",
                 result.get_current_price_unchecked().price
             );
             Some(U256::from(result.get_current_price_unchecked().price))
@@ -277,13 +198,12 @@ impl Client {
             let price_public_key =
                 Pubkey::from_str(oracle.switchboard_feed_address.as_str()).unwrap();
             let info = rpc.get_account(&price_public_key).await.unwrap();
-            let owner = info.owner;
-
-            let result = AggregatorState::try_from_slice(info.data.as_slice()).unwrap();
+            let owner = info.owner.clone();
 
             if owner == *SWITCHBOARD_V1_ADDRESS {
+                let result = AggregatorState::try_from_slice(&info.data[1..]).unwrap();
                 println!(
-                    "oracle: 2nd case: {:?}",
+                    "🎱 oracle: 2nd case: {:?}",
                     result.last_round_result.as_ref().unwrap().result.unwrap() as i64
                 );
 
@@ -291,18 +211,36 @@ impl Client {
                     result.last_round_result.unwrap().result.unwrap() as i64,
                 ))
             } else if owner == *SWITCHBOARD_V2_ADDRESS {
-                let retrieved = switchboard_program::get_aggregator_result(&result);
+                let mut info = info.clone();
+                let mut inner_accs = vec![
+                (&price_public_key, false, &mut info)
+                ];
+                let mut inner_accs = Box::leak(Box::new(inner_accs));
 
-                match retrieved {
-                    Ok(v) => {
-                        println!("oracle: 3rd case: {:?}", v.result.as_ref().unwrap());
-                        Some(U256::from(v.result.unwrap() as i64))
-                    }
+                let info = create_is_signer_account_infos(
+                    &mut (*inner_accs)
+                );
+                let result = switchboard_v2::AggregatorAccountData::new(&info[0]).unwrap();
+                let retrieved = result.get_result().unwrap();
 
-                    Err(_) => None,
-                }
+                let retrieved: f64 = retrieved.try_into().unwrap();
+                println!("🎱 oracle: 3rd case: {:?}", retrieved);
+
+                Some(U256::from(retrieved as i64))
+                // Some(retrieved.to_f64())
+                // match retrieved {
+                //     Ok(v) => {
+                //         println!("🎱 oracle: 3rd case: {:?}", v.result.as_ref().unwrap());
+                //         Some(U256::from(v.result.unwrap() as i64))
+                //     }
+
+                //     Err(_) => None,
+                // }
             } else {
-                println!("oracle: unrecognized switchboard owner address: {:}", owner);
+                println!(
+                    "🎱 oracle: unrecognized switchboard owner address: {:}",
+                    owner
+                );
                 None
             }
         };
@@ -633,15 +571,15 @@ impl Client {
         let r = self
             .config
             .rpc_client
-            .send_and_confirm_transaction_with_spinner(&transaction)
+            .send_and_confirm_transaction(&transaction)
             .await;
 
         match r {
             Ok(r) => {
-                println!("brodcast: signature: {:?}", r);
+                println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
             }
             Err(e) => {
-                println!("broadcast: err: {:?}", e)
+                println!(" 🚀 ❌ 🚀 broadcast: err: {:?}", e)
             }
         }
     }
@@ -722,7 +660,7 @@ pub fn calculate_refreshed_obligation(
 
         if token_oracle.is_none() {
             println!(
-                "(d) Missing token info for reserve {:}, skipping this obligation. \n
+                " 📥  Missing token info for reserve {:}, skipping this obligation. \n
             Please restart liquidator to fetch latest configs from /v1/config",
                 deposit.deposit_reserve
             );
@@ -748,7 +686,7 @@ pub fn calculate_refreshed_obligation(
         // export const WAD = new BigNumber(1000000000000000000);
         let collateral_exchange_rate = reserve.inner.collateral_exchange_rate().unwrap();
         println!(
-            "(d) collateral exchange rate: {:?}",
+            " 📥  collateral exchange rate: {:?}",
             collateral_exchange_rate
         );
 
@@ -757,24 +695,24 @@ pub fn calculate_refreshed_obligation(
             .mul(price)
             .div(Rate::from(collateral_exchange_rate).0.as_u128())
             .div(decimals as u32);
-        println!("(d) market_value: {:?}", market_value);
+        println!(" 📥  market_value: {:?}", market_value);
 
         let loan_to_value_rate = U256::from(reserve.inner.config.loan_to_value_ratio);
-        println!("(d): loan_to_value_rate: {:?}", loan_to_value_rate);
+        println!(" 📥 : loan_to_value_rate: {:?}", loan_to_value_rate);
 
         let liquidation_threshold_rate = U256::from(reserve.inner.config.liquidation_threshold);
         println!(
-            "(d) liquidation_threshold_rate: {:?}",
+            " 📥  liquidation_threshold_rate: {:?}",
             liquidation_threshold_rate
         );
 
         deposited_value = deposited_value.add(market_value);
-        println!("(d) deposited_value: {:?}", deposited_value);
+        println!(" 📥  deposited_value: {:?}", deposited_value);
         allowed_borrow_value = allowed_borrow_value.add(market_value * loan_to_value_rate);
-        println!("(d) allowed_borrow_value: {:?}", allowed_borrow_value);
+        println!(" 📥  allowed_borrow_value: {:?}", allowed_borrow_value);
         unhealthy_borrow_value =
             unhealthy_borrow_value.add(market_value * liquidation_threshold_rate);
-        println!("(d) unhealthy_borrow_value: {:?}", unhealthy_borrow_value);
+        println!(" 📥  unhealthy_borrow_value: {:?}", unhealthy_borrow_value);
 
         let casted_depo = Deposit {
             deposit_reserve: deposit.deposit_reserve,
@@ -782,7 +720,7 @@ pub fn calculate_refreshed_obligation(
             market_value,
             symbol,
         };
-        println!("(d) casted_depo: {:?}", casted_depo);
+        println!(" 📥  casted_depo: {:?}", casted_depo);
         deposits.push(casted_depo);
     }
 
@@ -821,11 +759,11 @@ pub fn calculate_refreshed_obligation(
         let obligation_cumulative_borrow_rate_wads = borrow.cumulative_borrow_rate_wads.0;
 
         println!(
-            "(b) reserve_cumulative_borrow_rate_wads: {:?}",
+            " 📤  reserve_cumulative_borrow_rate_wads: {:?}",
             reserve_cumulative_borrow_rate_wads
         );
         println!(
-            "(b) obligation_cumulative_borrow_rate_wads: {:?}",
+            " 📤  obligation_cumulative_borrow_rate_wads: {:?}",
             obligation_cumulative_borrow_rate_wads
         );
         /*
@@ -864,7 +802,7 @@ pub fn calculate_refreshed_obligation(
             }
         };
         println!(
-            "(b) borrow_amount_wads_with_interest: {:?}",
+            " 📤  borrow_amount_wads_with_interest: {:?}",
             borrow_amount_wads_with_interest_u192
         );
 
@@ -876,10 +814,10 @@ pub fn calculate_refreshed_obligation(
         );
 
         let market_value = borrow_amount_wads_with_interest * price / decimals;
-        println!("(b) market_value: {:?}", market_value);
+        println!(" 📤  market_value: {:?}", market_value);
 
         borrowed_value = borrowed_value + market_value;
-        println!("(b) borrowed_value: {:?}", borrowed_value);
+        println!(" 📤  borrowed_value: {:?}", borrowed_value);
 
         let mut obl_borrow_borrowed_amount_wads = U256::from(0);
         decimal_to_u256(
@@ -899,11 +837,11 @@ pub fn calculate_refreshed_obligation(
         borrows.push(casted_borrow);
     }
 
-    println!("final: borrowed_value: {:?}", borrowed_value);
-    println!("final: deposited_value: {:?}", deposited_value);
+    println!(" ✉️ : borrowed_value: {:?}", borrowed_value);
+    println!(" ✉️ : deposited_value: {:?}", deposited_value);
 
-    println!("final: deposits: {:?}", deposits);
-    println!("final: borrows: {:?}", borrows);
+    println!(" ✉️ : deposits: {:?}", deposits);
+    println!(" ✉️ : borrows: {:?}", borrows);
 
     let empty = U256::from(0u8);
     if deposited_value == empty || borrowed_value == empty {
@@ -1047,10 +985,10 @@ async fn process_markets(client: Arc<Client>) {
                         refreshed_obligation.borrows,
                     );
 
-                    if borrowed_value <= unhealthy_borrow_value {
-                        println!("do nothing if obligation is healthy");
-                        return;
-                    }
+                    // if borrowed_value <= unhealthy_borrow_value {
+                    //     println!("do nothing if obligation is healthy");
+                    //     return;
+                    // }
 
                     // select repay token that has the highest market value
                     let selected_borrow = {
@@ -1068,6 +1006,7 @@ async fn process_markets(client: Arc<Client>) {
                         }
                         v
                     };
+
 
                     // select the withdrawal collateral token with the highest market value
                     let selected_deposit = {
@@ -1105,6 +1044,16 @@ async fn process_markets(client: Arc<Client>) {
                     println!("market addr: {:} ", lending_market);
 
                     let wallet_address = c_client.config.signer.pubkey();
+                    println!(
+                        "
+                        wallet_address: {:?}
+                        selected_borrow.mint_address: {:?}
+                        selected_borrow.symbol: {:?}
+                    ",
+                        wallet_address,
+                        selected_borrow.mint_address,
+                        selected_borrow.symbol.clone(),
+                    );
                     let retrieved_wallet_data = get_wallet_token_data(
                         &c_client,
                         wallet_address,
@@ -1114,7 +1063,7 @@ async fn process_markets(client: Arc<Client>) {
                     .await
                     .unwrap();
 
-                    println!("retrieved_wallet_data: {:?}", retrieved_wallet_data);
+                    println!("🛢 🛢 🛢 retrieved_wallet_data: {:?}", retrieved_wallet_data);
 
                     let u_zero = U256::from(0);
                     if retrieved_wallet_data.balance == u_zero {
@@ -1159,9 +1108,8 @@ async fn process_markets(client: Arc<Client>) {
     }
 }
 
-pub async fn run_liquidator() {
+pub async fn run_eternal_liquidator() {
     let mut solend_client = Client::new();
-    // let solend_client: &mut _ = Box::leak(Box::new(solend_client));
 
     let solend_cfg = solend_client.get_solend_config().await;
     let solend_cfg: &'static _ = Box::leak(Box::new(solend_cfg));
@@ -1174,6 +1122,27 @@ pub async fn run_liquidator() {
         let c_solend_client = Arc::clone(&c_solend_client);
         process_markets(c_solend_client).await;
     }
+}
 
-    drop(solend_cfg);
+pub async fn run_liquidator_iter() {
+    let mut solend_client = Client::new();
+
+    let solend_cfg = solend_client.get_solend_config().await;
+    let solend_cfg: &'static _ = Box::leak(Box::new(solend_cfg));
+
+    solend_client.solend_cfg = Some(solend_cfg);
+
+    let c_solend_client = Arc::new(solend_client);
+
+    process_markets(c_solend_client).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_process_market_iter() {
+        run_liquidator_iter().await;
+    }
 }

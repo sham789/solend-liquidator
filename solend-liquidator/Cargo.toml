@@ -20,7 +20,6 @@ http = "0.2.6"
 bytes = "1.1.0"
 thiserror = "1.0.30"
 web3 = "0.18.0"
-criterion = "0.3.5"
 futures = "0.3.21"
 lazy_static = "1.4.0"
 parking_lot = "0.12.0"
@@ -54,3 +53,7 @@ uint = "=0.9.0"
 solend-program = { path = "../solana-program-library/token-lending/program" }
 switchboard-program = { path = "../overriden/switchboard-program-0.2.1" }
 switchboard-v2 = { path = "../overriden/switchboard-v2-0.1.10" }
+criterion = "0.3"
+
+
+[dev-dependencies]

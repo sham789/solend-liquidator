@@ -4,6 +4,7 @@
 # production
 /build
 **/build
+build/
 
 # misc
 id.json
@@ -12,3 +13,5 @@ id.json
 .git/
 **/target
 target/
+
+private/
