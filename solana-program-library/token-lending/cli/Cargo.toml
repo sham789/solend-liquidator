@@ -1,0 +1,24 @@
+[package]
+authors = ["Solend Maintainers <maintainers@solend.fi>"]
+description = "Solend Program CLI"
+edition = "2018"
+homepage = "https://solend.fi"
+license = "Apache-2.0"
+name = "solend-program-cli"
+repository = "https://github.com/solendprotocol/solana-program-library"
+version = "0.1.0"
+
+[dependencies]
+clap = "=2.34.0"
+solana-clap-utils = "=1.10.26"
+solana-cli-config = "=1.10.26"
+solana-client = "=1.10.26"
+solana-logger = "=1.10.26"
+solana-sdk = "=1.10.26"
+solana-program = "=1.10.26"
+solend-program = { path="../program", features = [ "no-entrypoint" ] }
+spl-token = { version = "3.2.0", features=["no-entrypoint"] }
+
+[[bin]]
+name = "solend-program"
+path = "src/main.rs"
