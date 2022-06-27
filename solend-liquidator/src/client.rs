@@ -212,14 +212,10 @@ impl Client {
                 ))
             } else if owner == *SWITCHBOARD_V2_ADDRESS {
                 let mut info = info.clone();
-                let mut inner_accs = vec![
-                (&price_public_key, false, &mut info)
-                ];
+                let mut inner_accs = vec![(&price_public_key, false, &mut info)];
                 let mut inner_accs = Box::leak(Box::new(inner_accs));
 
-                let info = create_is_signer_account_infos(
-                    &mut (*inner_accs)
-                );
+                let info = create_is_signer_account_infos(&mut (*inner_accs));
                 let result = switchboard_v2::AggregatorAccountData::new(&info[0]).unwrap();
                 let retrieved = result.get_result().unwrap();
 
@@ -1006,7 +1002,6 @@ async fn process_markets(client: Arc<Client>) {
                         }
                         v
                     };
-
 
                     // select the withdrawal collateral token with the highest market value
                     let selected_deposit = {
