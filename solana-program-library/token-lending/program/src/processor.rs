@@ -1917,6 +1917,16 @@ fn process_liquidate_obligation_and_redeem_reserve_collateral(
     Ok(())
 }
 
+
+#[inline(never)] // avoid stack frame limit
+fn process_generic_flash_loan(
+    program_id: &Pubkey,
+    liquidity_amount: u64,
+    accounts: &[AccountInfo],
+) -> ProgramResult {
+    Ok(())
+}
+
 #[inline(never)] // avoid stack frame limit
 fn process_flash_loan(
     program_id: &Pubkey,

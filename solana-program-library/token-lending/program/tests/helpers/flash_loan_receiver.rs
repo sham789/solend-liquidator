@@ -81,9 +81,13 @@ impl Processor {
             return Err(ProgramError::IncorrectProgramId);
         }
 
+        msg!("hey now you can use your funds");
+
         let balance_in_token_account =
             Account::unpack_from_slice(&source_liquidity_token_account_info.try_borrow_data()?)?
                 .amount;
+
+        // repay ix
         let transfer_ix = spl_token::instruction::transfer(
             token_program_id.key,
             source_liquidity_token_account_info.key,
