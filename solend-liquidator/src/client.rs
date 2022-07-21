@@ -21,6 +21,8 @@ use {
     std::str::FromStr,
 };
 
+use futures_retry::{FutureFactory, FutureRetry, RetryPolicy, StreamRetryExt};
+
 use pyth_sdk_solana;
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
@@ -46,6 +48,10 @@ use crate::utils::body_to_string;
 
 construct_uint! {
     pub struct U256(4);
+}
+
+fn handle_error<E: std::error::Error>(e: E) -> RetryPolicy<E> {
+        RetryPolicy::WaitRetry(std::time::Duration::from_millis(150))
 }
 
 pub struct Client {
@@ -425,6 +431,9 @@ impl Client {
 
         let uniq_reserve_addresses: Vec<Pubkey> = uniq_reserve_addresses.into_iter().collect();
 
+//         selected_borrow: Borrow { borrow_reserve: 2ZzkFjFj2y1irs6JqPDUK2F2B2fdkiY9dazd8SaZ4tRK, borrow_amount_wads: 808082774, market_value: 80808277400, mint_address: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v, symbol: "USDC" }
+// selected_deposit: Deposit { deposit_reserve: H1hpwRQsWXpx18D7uCFgnqj1oAesgLC8H1cDu5oYdrpa, deposit_amount: 1299579052518, market_value: 2615, symbol: "AURY" }
+
 
         // const USDC_LIQUIDATION_AMOUNT_FRACTIONAL: u64 =
         //     USDC_BORROW_AMOUNT_FRACTIONAL * (LIQUIDATION_CLOSE_FACTOR as u64) / 100;
@@ -433,6 +442,43 @@ impl Client {
         // like
         // USDC = borrow
         // SOL = deposit
+        //
+        
+
+        // let user_liquidity_pubkey = if spl_associated_token_account::get_associated_token_address()
+        // let alice_pubkey = Pubkey::from_str("BgvYtJEfmZYdVKiptmMjxGzv8iQoo4MWjsP3QsTkhhxa").unwrap();
+        // let account_data = rpc_client.get_account_data(&alice_pubkey).await?;
+        //
+        
+        async fn get_or_substitute_account_data(
+            funding_address: &Pubkey, 
+            wallet_address: &Pubkey, 
+            spl_token_mint_address: &Pubkey
+        ) -> Pubkey {
+            let associated_token_address = spl_associated_token_account::get_associated_token_address(
+                wallet_address,
+                spl_token_mint_address,
+            );
+            let leak_associated_token_address: &'static _ = Box::leak(Box::new(associated_token_address.clone()));
+
+            let token_account = FutureRetry::new(
+                move || {
+                    let account_data = rpc_client.get_account_data(&leak_associated_token_address).await?;
+                    
+                    if account_data.is_empty() {
+                        let ix = 
+                    } else {
+                        let 
+                    }
+                },
+                handle_error,
+            ).await;
+
+            drop(leak_associated_token_address);
+
+
+        }
+
 
         let mut transaction = Transaction::new_with_payer(
             &[
@@ -446,8 +492,10 @@ impl Client {
                     solend_program::id(),
                     // USDC_LIQUIDATION_AMOUNT_FRACTIONAL,
                     liquidity_amount_fractional,
+                    // just a spl_token::state::Token account
                     // usdc_test_reserve.user_liquidity_pubkey,
                     NULL_PUBKEY,
+                    // just a spl_token::state::Token account
                     // sol_test_reserve.user_collateral_pubkey,
                     NULL_PUBKEY,
                     // sol_test_reserve.user_liquidity_pubkey,
@@ -1098,6 +1146,9 @@ async fn process_markets(client: Arc<Client>) {
                     .unwrap();
 
                     println!("🛢 🛢 🛢 retrieved_wallet_data: {:?}", retrieved_wallet_data);
+
+                    println!("selected_borrow: {:?}", &selected_borrow);
+                    println!("selected_deposit: {:?}", &selected_deposit);
 
                     let u_zero = U256::from(0);
                     if retrieved_wallet_data.balance == u_zero {

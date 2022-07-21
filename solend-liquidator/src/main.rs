@@ -1,4 +1,5 @@
 mod client;
+mod helpers;
 mod model;
 mod utils;
 

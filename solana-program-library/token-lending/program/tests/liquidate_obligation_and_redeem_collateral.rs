@@ -17,7 +17,7 @@ use solend_program::{
 use std::cmp::max;
 
 #[tokio::test]
-async fn test_success() {
+async fn test_liquidate_obligation_and_redeem_reserve_collateral() {
     let mut test = ProgramTest::new(
         "solend_program",
         solend_program::id(),
@@ -114,6 +114,9 @@ async fn test_success() {
         get_token_balance(&mut banks_client, sol_test_reserve.user_liquidity_pubkey).await;
     let initial_fee_receiver_withdraw_liquidity_balance =
         get_token_balance(&mut banks_client, sol_test_reserve.config.fee_receiver).await;
+
+    println!("usdc_test_reserve: {:?}", usdc_test_reserve);
+    println!("sol_test_reserve: {:?}", sol_test_reserve);
 
     let mut transaction = Transaction::new_with_payer(
         &[

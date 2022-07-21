@@ -1,5 +1,6 @@
 use serde_derive::Deserialize;
 use serde_derive::Serialize;
+use serde_json::Value;
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +29,7 @@ pub struct Market {
     pub is_primary: bool,
     pub description: Option<String>,
     pub creator: String,
+    pub owner: String,
     pub address: String,
     pub authority_address: String,
     pub reserves: Vec<Resef>,
@@ -42,7 +44,8 @@ pub struct Resef {
     pub collateral_supply_address: String,
     pub liquidity_address: String,
     pub liquidity_fee_receiver_address: String,
-    pub user_supply_cap: Option<i64>,
+    pub user_supply_cap: Option<Value>,
+    pub user_borrow_cap: Option<Value>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -62,3 +65,4 @@ pub struct Asset2 {
     pub price_address: String,
     pub switchboard_feed_address: String,
 }
+
