@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::{Add, Div, Mul};
 use std::sync::Arc;
 
@@ -28,6 +28,7 @@ use solana_account_decoder::UiAccountEncoding;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
 use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
 
+use solana_program::instruction::Instruction;
 use solana_sdk::account::create_is_signer_account_infos;
 use solend_program::instruction::{
     liquidate_obligation_and_redeem_reserve_collateral, refresh_obligation, refresh_reserve,
@@ -42,7 +43,7 @@ use uint::construct_uint;
 
 // use switchboard_program::switchboard_protos::protos::aggregator_state::AggregatorState;
 
-use crate::model::{self, Asset, Market, Oracles, SolendConfig};
+use crate::model::{self, Market, SolendConfig};
 use crate::utils::body_to_string;
 
 construct_uint! {
@@ -105,6 +106,8 @@ lazy_static::lazy_static! {
         Pubkey::from_str("SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f").unwrap();
     static ref NULL_ORACLE: Pubkey =
         Pubkey::from_str("nu11111111111111111111111111111111111111111").unwrap();
+    static ref SOLEND_PROGRAM_ID: Pubkey =
+        Pubkey::from_str("So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo").unwrap();
 }
 
 impl Client {
@@ -125,7 +128,7 @@ impl Client {
         let request = Request::builder()
             .method(Method::GET)
             .uri(format!(
-                "https://api.solend.fi/v1/config?deployment={:}",
+                "https://api.solend.fi/v1/markets/configs?scope=all&deployment={:}",
                 Self::CFG_PRESET
             ))
             .header("Content-Type", "application/json")
@@ -136,6 +139,7 @@ impl Client {
 
         let body = res.into_body();
         let body_str = body_to_string(body).await;
+        // println!("body_str: {:?}", body_str);
 
         let solend_cfg: SolendConfig = serde_json::from_str(&body_str).unwrap();
 
@@ -146,25 +150,17 @@ impl Client {
         &self,
         market_reserves: &Vec<model::Resef>,
     ) -> Vec<OracleData> {
-        let solend_cfg = self.solend_cfg.unwrap();
-
-        let solend_cfg = Arc::new(solend_cfg.clone());
-
         let rpc = Arc::new(get_config().rpc_client);
 
         let mut oracle_data_list = vec![];
         let mut handles = vec![];
 
         for market_reserve in market_reserves {
-
-            let solend_cfg = Arc::clone(&solend_cfg);
             let c_rpc = Arc::clone(&rpc);
             let market_reserve = market_reserve.clone();
 
             let h = tokio::spawn(async move {
-                if let Some(oracle_data) =
-                    Self::get_oracle_data(&c_rpc, &solend_cfg, market_reserve).await
-                {
+                if let Some(oracle_data) = Self::get_oracle_data(&c_rpc, &market_reserve).await {
                     Some(oracle_data)
                 } else {
                     None
@@ -178,10 +174,11 @@ impl Client {
             match h.await.unwrap() {
                 Some(v) => {
                     oracle_data_list.push(v);
-                },
-                None => { continue; }
+                }
+                None => {
+                    continue;
+                }
             }
-
         }
 
         oracle_data_list
@@ -191,43 +188,38 @@ impl Client {
     // const SWITCHBOARD_V1_ADDRESS: &'static str = "DtmE9D2CSB4L5D6A15mraeEjrGMm6auWVzgaD8hK2tZM";
     // const SWITCHBOARD_V2_ADDRESS: &'static str = "SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f";
 
-    async fn get_oracle_data(
-        rpc: &Arc<RpcClient>,
-        solend_cfg: &Arc<SolendConfig>,
-        reserve: model::Resef,
-    ) -> Option<OracleData> {
-        let oracle = {
-            let mut v = model::Asset2::default();
-            for oracle_asset in &solend_cfg.oracles.assets {
-                if oracle_asset.asset == reserve.asset {
-                    v = oracle_asset.clone();
-                    break;
-                }
-            }
-            v
-        };
+    async fn get_oracle_data(rpc: &Arc<RpcClient>, reserve: &model::Resef) -> Option<OracleData> {
+        // let oracle = {
+        //     let mut v = Default::default();
+        //     for oracle_asset in &reserve {
+        //         if oracle_asset.address == reserve.address {
+        //             v = oracle_asset.clone();
+        //             break;
+        //         }
+        //     }
+        //     v
+        // };
 
         // let rpc: &RpcClient = &self.config.rpc_client;
-
         // let price =
-        let price = if !oracle.price_address.is_empty()
-            && Pubkey::from_str(oracle.price_address.as_str()).unwrap() != *NULL_ORACLE
+
+        let price = if !reserve.pyth_oracle.is_empty()
+            && Pubkey::from_str(reserve.pyth_oracle.as_str()).unwrap() != *NULL_ORACLE
         {
-            let price_public_key = Pubkey::from_str(oracle.price_address.as_str()).unwrap();
+            let price_public_key = Pubkey::from_str(reserve.pyth_oracle.as_str()).unwrap();
             let mut result = rpc.get_account(&price_public_key).await.unwrap();
 
             let result =
                 pyth_sdk_solana::load_price_feed_from_account(&price_public_key, &mut result)
                     .unwrap();
 
-            println!(
-                "🎱 oracle: 1st case: {:?}",
-                result.get_current_price_unchecked().price
-            );
+            // println!(
+            //     "🎱 oracle: 1st case: {:?}",
+            //     result.get_current_price_unchecked().price
+            // );
             Some(U256::from(result.get_current_price_unchecked().price))
         } else {
-            let price_public_key =
-                Pubkey::from_str(oracle.switchboard_feed_address.as_str()).unwrap();
+            let price_public_key = Pubkey::from_str(reserve.switchboard_oracle.as_str()).unwrap();
             let info = rpc.get_account(&price_public_key).await.unwrap();
             let owner = info.owner.clone();
 
@@ -244,10 +236,10 @@ impl Client {
                 }
 
                 let result = result.unwrap();
-                println!(
-                    "🎱 oracle: 2nd case: {:?}",
-                    result.last_round_result.as_ref().unwrap().result.unwrap() as i64
-                );
+                // println!(
+                //     "🎱 oracle: 2nd case: {:?}",
+                //     result.last_round_result.as_ref().unwrap().result.unwrap() as i64
+                // );
 
                 Some(U256::from(
                     result.last_round_result.unwrap().result.unwrap() as i64,
@@ -262,7 +254,7 @@ impl Client {
                 let retrieved = result.get_result().unwrap();
 
                 let retrieved: f64 = retrieved.try_into().unwrap();
-                println!("🎱 oracle: 3rd case: {:?}", retrieved);
+                // println!("🎱 oracle: 3rd case: {:?}", retrieved);
 
                 Some(U256::from(retrieved as i64))
                 // Some(retrieved.to_f64())
@@ -287,19 +279,16 @@ impl Client {
 
         match price {
             Some(price) => {
-                let asset_config =
-                    Self::find_where(&solend_cfg.assets, |x| x.symbol == oracle.asset);
-
                 Some(OracleData {
                     // pub symbol: String,
                     // pub reserve_address: Pubkey,
                     // pub mint_address: Pubkey,
                     // pub decimals: u8,
                     // pub price: pyth_sdk_solana::state::Price
-                    symbol: oracle.asset,
+                    symbol: reserve.liquidity_token.symbol.clone(),
                     reserve_address: Pubkey::from_str(reserve.address.as_str()).unwrap(),
-                    mint_address: Pubkey::from_str(asset_config.mint_address.as_str()).unwrap(),
-                    decimals: 10i64.pow(asset_config.decimals as u32),
+                    mint_address: Pubkey::from_str(reserve.liquidity_token.mint.as_str()).unwrap(),
+                    decimals: 10i64.pow(reserve.liquidity_token.decimals as u32),
                     price,
                 })
             }
@@ -311,7 +300,7 @@ impl Client {
         let rpc: &RpcClient = &self.config.rpc_client;
         let solend_cfg = self.solend_cfg.unwrap();
 
-        let program_id = Pubkey::from_str(solend_cfg.program_id.as_str()).unwrap();
+        let program_id = SOLEND_PROGRAM_ID.clone();
         let market_address = Pubkey::from_str(market_address).unwrap();
 
         let memcmp = RpcFilterType::Memcmp(Memcmp {
@@ -370,7 +359,7 @@ impl Client {
         let rpc: &RpcClient = &self.config.rpc_client;
         let solend_cfg = self.solend_cfg.unwrap();
 
-        let program_id = Pubkey::from_str(solend_cfg.program_id.as_str()).unwrap();
+        let program_id = SOLEND_PROGRAM_ID.clone();
         let market_address = Pubkey::from_str(market_address).unwrap();
 
         let memcmp = RpcFilterType::Memcmp(Memcmp {
@@ -421,9 +410,127 @@ impl Client {
         reserves_list
     }
 
-    pub fn get_token_info(assets: &Vec<Asset>, symbol: &str) -> Asset {
-        let idx = assets.iter().position(|a| a.symbol == symbol).unwrap();
-        assets[idx].clone()
+    // pub fn get_token_info(assets: &Vec<Asset>, symbol: &str) -> Asset {
+    //     let idx = assets.iter().position(|a| a.symbol == symbol).unwrap();
+    //     assets[idx].clone()
+    // }
+
+    async fn get_or_create_account_data(
+        funding_address: &Pubkey,
+        wallet_address: &Pubkey,
+        spl_token_mint_address: &Pubkey,
+        rpc_client: &RpcClient,
+        signer: &Keypair,
+    ) -> Pubkey {
+        let associated_token_address = spl_associated_token_account::get_associated_token_address(
+            wallet_address,
+            spl_token_mint_address,
+        );
+        let leak_associated_token_address: &'static _ =
+            Box::leak(Box::new(associated_token_address.clone()));
+
+        let (account_data, _) = FutureRetry::new(
+            move || rpc_client.get_account_data(&leak_associated_token_address),
+            handle_error,
+        )
+        .await
+        .unwrap();
+
+        if account_data.is_empty() {
+
+            let ix = spl_associated_token_account::instruction::create_associated_token_account(
+                funding_address,
+                wallet_address,
+                spl_token_mint_address,
+            );
+
+            let recent_blockhash = rpc_client.get_latest_blockhash().await.unwrap();
+            let mut transaction = Transaction::new_with_payer(&[ix], Some(&signer.pubkey()));
+
+            transaction.sign(&vec![signer], recent_blockhash);
+
+            let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
+
+            // let (r, _) = FutureRetry::new(
+            //     move || rpc_client.send_and_confirm_transaction(transaction),
+            //     handle_error,
+            // )
+            // .await
+            // .unwrap();
+            let r = rpc_client.send_and_confirm_transaction(transaction).await.unwrap();
+
+            println!("tx: {:?}", r);
+            rpc_client
+                .send_and_confirm_transaction(transaction)
+                .await
+                .unwrap();
+
+            drop(transaction);
+        }
+
+        drop(leak_associated_token_address);
+
+        associated_token_address
+    }
+
+    async fn get_or_substitute_account_data(
+        funding_address: &Pubkey,
+        wallet_address: &Pubkey,
+        spl_token_mint_address: &Pubkey,
+        rpc_client: &RpcClient,
+        signer: &Keypair,
+    ) -> (Pubkey, Option<Instruction>) {
+        let associated_token_address = spl_associated_token_account::get_associated_token_address(
+            wallet_address,
+            spl_token_mint_address,
+        );
+        let leak_associated_token_address: &'static _ =
+            Box::leak(Box::new(associated_token_address.clone()));
+
+        let (account_data, _) = FutureRetry::new(
+            move || rpc_client.get_account_data(&leak_associated_token_address),
+            handle_error,
+        )
+        .await
+        .unwrap();
+
+        // println!("account_data: {:?}", associated_token_address);
+
+        if account_data.is_empty() {
+            let ix = spl_associated_token_account::instruction::create_associated_token_account(
+                funding_address,
+                wallet_address,
+                spl_token_mint_address,
+            );
+            return (associated_token_address, Some(ix));
+
+            // let recent_blockhash = rpc_client.get_latest_blockhash().await.unwrap();
+            // let mut transaction = Transaction::new_with_payer(&[ix], Some(&signer.pubkey()));
+
+            // transaction.sign(&vec![signer], recent_blockhash);
+
+            // let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
+
+            // let (r, _) = FutureRetry::new(
+            //     move || rpc_client.send_and_confirm_transaction(transaction),
+            //     handle_error,
+            // )
+            // .await
+            // .unwrap();
+
+            // println!("tx: {:?}", r);
+            // rpc_client
+            //     .send_and_confirm_transaction(transaction)
+            //     .await
+            //     .unwrap();
+
+            // drop(transaction);
+        }
+
+        (associated_token_address, None)
+        // drop(leak_associated_token_address);
+
+        // associated_token_address
     }
 
     pub async fn liquidate_and_redeem(
@@ -435,13 +542,12 @@ impl Client {
         selected_deposit: &Deposit,
         lending_market: Market,
         obligation: &Enhanced<Obligation>,
-    ) {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let solend_cfg = self.solend_cfg.unwrap();
-
         let payer_pubkey = self.config.signer.pubkey();
 
-        // let repay_token_symbol = &selected_borrow.symbol;
-        // let withdraw_token_symbol = &selected_deposit.symbol;
+        let repay_token_symbol = &selected_borrow.symbol;
+        let withdraw_token_symbol = &selected_deposit.symbol;
 
         let deposit_reserves: Vec<Pubkey> = obligation
             .inner
@@ -462,288 +568,185 @@ impl Client {
             uniq_reserve_addresses.insert(reserve);
         }
 
-        let program_id = Pubkey::from_str(solend_cfg.program_id.as_str()).unwrap();
-
-        let recent_blockhash = self.config.rpc_client.get_latest_blockhash().await.unwrap();
-
         let uniq_reserve_addresses: Vec<Pubkey> = uniq_reserve_addresses.into_iter().collect();
 
-        println!("uniq_reserve_addresses: {:?}", uniq_reserve_addresses);
+        let mut ixs = vec![];
+        for reserve in &uniq_reserve_addresses {
+            let reserve_info = Self::find_where(&lending_market.reserves, |x| {
+                Pubkey::from_str(x.address.as_str()).unwrap() == *reserve
+            });
 
-        //         selected_borrow: Borrow { borrow_reserve: 2ZzkFjFj2y1irs6JqPDUK2F2B2fdkiY9dazd8SaZ4tRK, borrow_amount_wads: 808082774, market_value: 80808277400, mint_address: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v, symbol: "USDC" }
-        // selected_deposit: Deposit { deposit_reserve: H1hpwRQsWXpx18D7uCFgnqj1oAesgLC8H1cDu5oYdrpa, deposit_amount: 1299579052518, market_value: 2615, symbol: "AURY" }
+            // const refreshReserveIx = refreshReserveInstruction(
+            //     new PublicKey(reserveAddress),
+            //     new PublicKey(reserveInfo.pythOracle),
+            //     new PublicKey(reserveInfo.switchboardOracle),
+            // );
+            // ixs.push(refreshReserveIx);
 
-        // const USDC_LIQUIDATION_AMOUNT_FRACTIONAL: u64 =
-        //     USDC_BORROW_AMOUNT_FRACTIONAL * (LIQUIDATION_CLOSE_FACTOR as u64) / 100;
-        // let liquidity_amount_fractional = 0u64;
-        let liquidity_amount_fractional = obligation
-            .inner
-            .borrowed_value
-            .try_div(100)
-            .unwrap()
-            .try_round_u64()
-            .unwrap();
-
-        // like
-        // USDC = borrow
-        // SOL = deposit
-        //
-
-        // let user_liquidity_pubkey = if spl_associated_token_account::get_associated_token_address()
-        // let alice_pubkey = Pubkey::from_str("BgvYtJEfmZYdVKiptmMjxGzv8iQoo4MWjsP3QsTkhhxa").unwrap();
-        // let account_data = rpc_client.get_account_data(&alice_pubkey).await?;
-        //
-
-        async fn get_or_substitute_account_data(
-            funding_address: &Pubkey,
-            wallet_address: &Pubkey,
-            spl_token_mint_address: &Pubkey,
-            rpc_client: &RpcClient,
-            signer: &Keypair,
-        ) -> Pubkey {
-            let associated_token_address =
-                spl_associated_token_account::get_associated_token_address(
-                    wallet_address,
-                    spl_token_mint_address,
-                );
-            let leak_associated_token_address: &'static _ =
-                Box::leak(Box::new(associated_token_address.clone()));
-
-            let (account_data, _) = FutureRetry::new(
-                move || rpc_client.get_account_data(&leak_associated_token_address),
-                handle_error,
-            )
-            .await
-            .unwrap();
-
-            if account_data.is_empty() {
-                let ix = spl_associated_token_account::instruction::create_associated_token_account(
-                    funding_address,
-                    wallet_address,
-                    spl_token_mint_address,
-                );
-
-                let recent_blockhash = rpc_client.get_latest_blockhash().await.unwrap();
-                let mut transaction = Transaction::new_with_payer(&[ix], Some(&signer.pubkey()));
-
-                transaction.sign(&vec![signer], recent_blockhash);
-
-                let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
-
-                let _ = FutureRetry::new(
-                    move || rpc_client.send_and_confirm_transaction(transaction),
-                    handle_error,
-                )
-                .await
-                .unwrap();
-
-                drop(transaction);
-            }
-
-            drop(leak_associated_token_address);
-
-            associated_token_address
+            let refresh_reserve_ix = solend_program::instruction::refresh_reserve(
+                // program_id,
+                // reserve_pubkey,
+                // reserve_liquidity_pyth_oracle_pubkey,
+                // reserve_liquidity_switchboard_oracle_pubkey
+                *SOLEND_PROGRAM_ID,
+                Pubkey::from_str(reserve_info.address.as_str()).unwrap(),
+                Pubkey::from_str(&reserve_info.pyth_oracle.as_str()).unwrap(),
+                Pubkey::from_str(reserve_info.switchboard_oracle.as_str()).unwrap(),
+            );
+            ixs.push(refresh_reserve_ix);
         }
 
-        let mut transaction = Transaction::new_with_payer(
-            &[
-                refresh_obligation(
-                    solend_program::id(),
-                    obligation.pubkey,
-                    // vec![sol_test_reserve.pubkey, usdc_test_reserve.pubkey],
-                    uniq_reserve_addresses,
-                ),
-                liquidate_obligation_and_redeem_reserve_collateral(
-                    solend_program::id(),
-                    // USDC_LIQUIDATION_AMOUNT_FRACTIONAL,
-                    liquidity_amount_fractional,
-                    // just a spl_token::state::Token account
-                    // usdc_test_reserve.user_liquidity_pubkey,
-                    get_or_substitute_account_data(
-                        // funding_address: &Pubkey,
-                        // wallet_address: &Pubkey,
-                        // spl_token_mint_address: &Pubkey
-                        &payer_pubkey,
-                        &payer_pubkey,
-                        &selected_borrow.mint_address,
-                        &self.config.rpc_client,
-                        &self.config.signer,
-                    )
-                    .await,
-                    get_or_substitute_account_data(
-                        &payer_pubkey,
-                        &payer_pubkey,
-                        &selected_deposit.deposit_reserve,
-                        &self.config.rpc_client,
-                        &self.config.signer,
-                    )
-                    .await,
-                    // sol_test_reserve.user_liquidity_pubkey,
-                    NULL_PUBKEY,
-                    // usdc_test_reserve.pubkey,
-                    selected_borrow.borrow_reserve,
-                    // usdc_test_reserve.liquidity_supply_pubkey,
-                    NULL_PUBKEY,
-                    // sol_test_reserve.pubkey,
-                    selected_deposit.deposit_reserve,
-                    // sol_test_reserve.collateral_mint_pubkey,
-                    NULL_PUBKEY,
-                    // sol_test_reserve.collateral_supply_pubkey,
-                    NULL_PUBKEY,
-                    // sol_test_reserve.liquidity_supply_pubkey,
-                    NULL_PUBKEY,
-                    // sol_test_reserve.config.fee_receiver,
-                    NULL_PUBKEY,
-                    obligation.pubkey,
-                    obligation.inner.lending_market,
-                    payer_pubkey,
-                ),
-            ],
-            Some(&payer_pubkey),
+        let refresh_obligation_ix = solend_program::instruction::refresh_obligation(
+            // program_id,
+            // obligation_pubkey,
+            // reserve_pubkeys
+            SOLEND_PROGRAM_ID.clone(),
+            obligation.pubkey,
+            uniq_reserve_addresses.clone(),
         );
 
-        transaction.sign(&vec![self.config.signer.as_ref()], recent_blockhash);
+        let repay_token_info = Self::find_where(&lending_market.reserves, |x| {
+            x.liquidity_token.symbol == *repay_token_symbol
+        });
 
-        let r = self
-            .config
-            .rpc_client
-            .send_and_confirm_transaction(&transaction)
-            .await;
+        // get account that will be repaying the reserve liquidity
+        let repay_account = spl_associated_token_account::get_associated_token_address(
+            // wallet_address,
+            // spl_token_mint_address
+            &payer_pubkey,
+            &Pubkey::from_str(repay_token_info.liquidity_token.mint.as_str()).unwrap(),
+        );
 
-        match r {
-            Ok(r) => {
-                println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
-            }
-            Err(e) => {
-                println!(" 🚀 ❌ 🚀  broadcast: err: {:?}", e)
-            }
+        //   const reserveSymbolToReserveMap = new Map<string, MarketConfigReserve>(
+        //     lendingMarket.reserves.map((reserve) => [reserve.liquidityToken.symbol, reserve]),
+        //   );
+        let mut reserve_symbol_to_reserve_map: HashMap<String, model::Resef> = HashMap::new();
+        for r in &lending_market.reserves {
+            reserve_symbol_to_reserve_map.insert(r.liquidity_token.symbol.clone(), r.clone());
         }
 
-        // let refresh_obligation_ix = refresh_obligation(
-        //     // program_id,
-        //     // obligation_pubkey,
-        //     // reserve_pubkeys
-        //     program_id,
-        //     obligation.pubkey,
-        //     HashSet::into_iter(uniq_reserve_addresses).collect(),
-        // );
-        // ixs_list.push(refresh_obligation_ix);
+        let repay_reserve = reserve_symbol_to_reserve_map.get(repay_token_symbol);
+        let withdraw_reserve = reserve_symbol_to_reserve_map.get(withdraw_token_symbol);
 
-        // let repay_token_info =
-        //     Self::get_token_info(&solend_cfg.assets, repay_token_symbol.as_str());
+        let withdraw_token_info = Self::find_where(&lending_market.reserves, |x| {
+            x.liquidity_token.symbol == *withdraw_token_symbol
+        });
 
-        // // get account that will be repaying the reserve liquidity
-        // let _repay_account = get_associated_token_address(
-        //     &payer_pubkey,
-        //     &Pubkey::from_str(repay_token_info.mint_address.as_str()).unwrap(),
-        // );
+        // if (!withdrawReserve || !repayReserve) {
+        //     throw new Error('reserves are not identified');
+        // }
+        if withdraw_reserve.is_none() || repay_reserve.is_none() {
+            return Err(Box::new(
+                LiquidationAndRedeemError::ReservesAreNotIdentified,
+            ));
+        }
 
-        // let repay_reserve =
-        //     Self::find_where(&lending_market.reserves, |x| &x.asset == repay_token_symbol);
-        // let withdraw_reserve = Self::find_where(&lending_market.reserves, |x| {
-        //     &x.asset == withdraw_token_symbol
-        // });
-        // let withdraw_token_info =
-        //     Self::get_token_info(&solend_cfg.assets, withdraw_token_symbol.as_str());
+        let withdraw_reserve = withdraw_reserve.unwrap();
+        let repay_reserve = repay_reserve.unwrap();
 
-        // let rewarded_withdrawal_collateral_account = get_associated_token_address(
-        //     &payer_pubkey,
-        //     &Pubkey::from_str(withdraw_reserve.collateral_mint_address.as_str()).unwrap(),
-        // );
-
+        // let rewarded_withdrawal_collateral_account =
+        //     spl_associated_token_account::get_associated_token_address(
+        //         // wallet_address,
+        //         // spl_token_mint_address
+        //         &payer_pubkey,
+        //         &Pubkey::from_str(withdraw_reserve.collateral_mint_address.as_str()).unwrap(),
+        //     );
         // let rewarded_withdrawal_collateral_account_info = self
         //     .config
         //     .rpc_client
         //     .get_account(&rewarded_withdrawal_collateral_account)
-        //     .await;
+        //     .await
+        //     .unwrap();
+        let (rewarded_withdrawal_collateral_account, rewarded_withdrawal_collateral_account_ix) =
+            Self::get_or_substitute_account_data(
+                &payer_pubkey,
+                &payer_pubkey,
+                &Pubkey::from_str(withdraw_reserve.collateral_mint_address.as_str()).unwrap(),
+                &self.config.rpc_client,
+                &self.config.signer,
+            )
+            .await;
+        if let Some(ix) = rewarded_withdrawal_collateral_account_ix {
+            ixs.push(ix);
+        }
 
-        // if rewarded_withdrawal_collateral_account_info.is_err() {
-        //     // let create_user_collateral_account
-        //     let create_user_collateral_account_ix = create_associated_token_account(
-        //         // funding_address,
-        //         // wallet_address,
-        //         // spl_token_mint_address
-        //         &payer_pubkey,
-        //         &payer_pubkey,
-        //         &Pubkey::from_str(withdraw_reserve.collateral_mint_address.as_str()).unwrap(),
-        //     );
-        //     ixs_list.push(create_user_collateral_account_ix);
-        // }
+        let (rewarded_withdrawal_liquidity_account, rewarded_withdrawal_liquidity_account_ix) =
+            Self::get_or_substitute_account_data(
+                &payer_pubkey,
+                &payer_pubkey,
+                &Pubkey::from_str(&withdraw_token_info.liquidity_token.mint.as_str()).unwrap(),
+                &self.config.rpc_client,
+                &self.config.signer,
+            )
+            .await;
+        if let Some(ix) = rewarded_withdrawal_liquidity_account_ix {
+            ixs.push(ix);
+        }
 
-        // let rewarded_withdrawal_liquidity_account = get_associated_token_address(
-        //     &payer_pubkey,
-        //     &Pubkey::from_str(withdraw_token_info.mint_address.as_str()).unwrap(),
-        // );
-        // let rewarded_withdrawal_liquidity_account_info = self
-        //     .config
-        //     .rpc_client
-        //     .get_account(&rewarded_withdrawal_liquidity_account)
-        //     .await;
+        ixs.push(
+            solend_program::instruction::liquidate_obligation_and_redeem_reserve_collateral(
+                // program_id,
+                SOLEND_PROGRAM_ID.clone(),
+                // liquidity_amount,
+                retrieved_wallet_data.balance.as_u64(),
+                // source_liquidity_pubkey,
+                repay_account,
+                // destination_collateral_pubkey,
+                rewarded_withdrawal_collateral_account,
+                // destination_liquidity_pubkey,
+                rewarded_withdrawal_liquidity_account,
+                // repay_reserve_pubkey,
+                Pubkey::from_str(repay_reserve.address.as_str()).unwrap(),
+                // repay_reserve_liquidity_supply_pubkey,
+                Pubkey::from_str(repay_reserve.liquidity_address.as_str()).unwrap(),
+                Pubkey::from_str(withdraw_reserve.address.as_str()).unwrap(),
+                Pubkey::from_str(withdraw_reserve.collateral_mint_address.as_str()).unwrap(),
+                // withdraw_reserve_pubkey,
+                Pubkey::from_str(withdraw_reserve.collateral_supply_address.as_str()).unwrap(),
+                // withdraw_reserve_collateral_mint_pubkey,
+                Pubkey::from_str(withdraw_reserve.liquidity_address.as_str()).unwrap(),
+                // withdraw_reserve_collateral_supply_pubkey,
+                Pubkey::from_str(withdraw_reserve.liquidity_fee_receiver_address.as_str()).unwrap(),
+                // withdraw_reserve_liquidity_supply_pubkey,
+                obligation.pubkey,
+                // withdraw_reserve_liquidity_fee_receiver_pubkey,
+                Pubkey::from_str(lending_market.address.as_str()).unwrap(),
+                // obligation_pubkey,
+                payer_pubkey,
+                // lending_market_pubkey,
+            ),
+        );
 
-        // if rewarded_withdrawal_liquidity_account_info.is_err() {
-        //     let create_user_liquidity_account_ix = create_associated_token_account(
-        //         // funding_address,
-        //         // wallet_address,
-        //         // spl_token_mint_address
-        //         &payer_pubkey,
-        //         &payer_pubkey,
-        //         &Pubkey::from_str(withdraw_token_info.mint_address.as_str()).unwrap(),
-        //     );
-        //     ixs_list.push(create_user_liquidity_account_ix);
-        // }
+        let recent_blockhash = self.config.rpc_client.get_latest_blockhash().await.unwrap();
 
-        // ixs_list.push(liquidate_obligation_and_redeem_reserve_collateral(
-        //     // program_id,
-        //     // liquidity_amount,
-        //     // source_liquidity_pubkey,
-        //     // destination_collateral_pubkey,
-        //     // destination_liquidity_pubkey,
-        //     // repay_reserve_pubkey,
-        //     // repay_reserve_liquidity_supply_pubkey,
-        //     // withdraw_reserve_pubkey,
-        //     // withdraw_reserve_collateral_mint_pubkey,
-        //     // withdraw_reserve_collateral_supply_pubkey,
-        //     // withdraw_reserve_liquidity_supply_pubkey,
-        //     // withdraw_reserve_liquidity_fee_receiver_pubkey,
-        //     // obligation_pubkey,
-        //     // lending_market_pubkey,
-        //     // user_transfer_authority_pubkey
-        //     program_id,
-        //     retrieved_wallet_data.balance.as_u64(),
-        //     rewarded_withdrawal_collateral_account,
-        //     rewarded_withdrawal_liquidity_account,
-        //     Pubkey::from_str(repay_reserve.address.as_str()).unwrap(),
-        //     Pubkey::from_str(repay_reserve.liquidity_address.as_str()).unwrap(),
-        //     Pubkey::from_str(withdraw_reserve.address.as_str()).unwrap(),
-        //     Pubkey::from_str(withdraw_reserve.collateral_mint_address.as_str()).unwrap(),
-        //     Pubkey::from_str(withdraw_reserve.collateral_supply_address.as_str()).unwrap(),
-        //     Pubkey::from_str(withdraw_reserve.liquidity_address.as_str()).unwrap(),
-        //     Pubkey::from_str(withdraw_reserve.liquidity_fee_receiver_address.as_str()).unwrap(),
-        //     obligation.pubkey,
-        //     Pubkey::from_str(lending_market.address.as_str()).unwrap(),
-        //     Pubkey::from_str(lending_market.authority_address.as_str()).unwrap(),
-        //     payer_pubkey,
-        // ));
+        let mut transaction = Transaction::new_with_payer(&ixs, Some(&self.config.signer.pubkey()));
 
-        // let recent_blockhash = self.config.rpc_client.get_latest_blockhash().await.unwrap();
-        // let mut transaction = Transaction::new_with_payer(&ixs_list, Some(&payer_pubkey));
+        transaction.sign(&[self.config.signer.as_ref()], recent_blockhash);
 
-        // transaction.sign(&vec![self.config.signer.as_ref()], recent_blockhash);
+        let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
 
-        // let r = self
-        //     .config
-        //     .rpc_client
-        //     .send_and_confirm_transaction(&transaction)
-        //     .await;
+        let r = FutureRetry::new(
+            move || {
+                self.config
+                    .rpc_client
+                    .send_and_confirm_transaction(transaction)
+            },
+            handle_error,
+        )
+        .await;
+        
+        // println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
 
-        // match r {
-        //     Ok(r) => {
-        //         println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
-        //     }
-        //     Err(e) => {
-        //         println!(" 🚀 ❌ 🚀 broadcast: err: {:?}", e)
-        //     }
-        // }
+        match r {
+            Ok((r, _)) => {
+                println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
+            }
+            Err(e) => {
+                println!(" 🚀 ❌ 🚀 broadcast: err: {:?}", e)
+            }
+        }
+
+        Ok(())
     }
 
     fn find_where<T: Clone, F>(list: &Vec<T>, predicate: F) -> T
@@ -753,6 +756,12 @@ impl Client {
         let idx = list.iter().position(predicate).unwrap();
         list[idx].clone()
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum LiquidationAndRedeemError {
+    #[error("reserves are not identified")]
+    ReservesAreNotIdentified,
 }
 
 // type Borrow = {
@@ -847,34 +856,34 @@ pub fn calculate_refreshed_obligation(
 
         // export const WAD = new BigNumber(1000000000000000000);
         let collateral_exchange_rate = reserve.inner.collateral_exchange_rate().unwrap();
-        println!(
-            " 📥  collateral exchange rate: {:?}",
-            collateral_exchange_rate
-        );
+        // println!(
+        //     " 📥  collateral exchange rate: {:?}",
+        //     collateral_exchange_rate
+        // );
 
         let market_value = U256::from(deposit.deposited_amount)
             .mul(wad())
             .mul(price)
             .div(Rate::from(collateral_exchange_rate).0.as_u128())
             .div(decimals as u32);
-        println!(" 📥  market_value: {:?}", market_value);
+        // println!(" 📥  market_value: {:?}", market_value);
 
         let loan_to_value_rate = U256::from(reserve.inner.config.loan_to_value_ratio);
-        println!(" 📥 : loan_to_value_rate: {:?}", loan_to_value_rate);
+        // println!(" 📥 : loan_to_value_rate: {:?}", loan_to_value_rate);
 
         let liquidation_threshold_rate = U256::from(reserve.inner.config.liquidation_threshold);
-        println!(
-            " 📥  liquidation_threshold_rate: {:?}",
-            liquidation_threshold_rate
-        );
+        // println!(
+        //     " 📥  liquidation_threshold_rate: {:?}",
+        //     liquidation_threshold_rate
+        // );
 
         deposited_value = deposited_value.add(market_value);
-        println!(" 📥  deposited_value: {:?}", deposited_value);
+        // println!(" 📥  deposited_value: {:?}", deposited_value);
         allowed_borrow_value = allowed_borrow_value.add(market_value * loan_to_value_rate);
-        println!(" 📥  allowed_borrow_value: {:?}", allowed_borrow_value);
+        // println!(" 📥  allowed_borrow_value: {:?}", allowed_borrow_value);
         unhealthy_borrow_value =
             unhealthy_borrow_value.add(market_value * liquidation_threshold_rate);
-        println!(" 📥  unhealthy_borrow_value: {:?}", unhealthy_borrow_value);
+        // println!(" 📥  unhealthy_borrow_value: {:?}", unhealthy_borrow_value);
 
         let casted_depo = Deposit {
             deposit_reserve: deposit.deposit_reserve,
@@ -882,7 +891,7 @@ pub fn calculate_refreshed_obligation(
             market_value,
             symbol,
         };
-        println!(" 📥  casted_depo: {:?}", casted_depo);
+        // println!(" 📥  casted_depo: {:?}", casted_depo);
         deposits.push(casted_depo);
     }
 
@@ -920,14 +929,15 @@ pub fn calculate_refreshed_obligation(
             reserve.inner.liquidity.cumulative_borrow_rate_wads.0;
         let obligation_cumulative_borrow_rate_wads = borrow.cumulative_borrow_rate_wads.0;
 
-        println!(
-            " 📤  reserve_cumulative_borrow_rate_wads: {:?}",
-            reserve_cumulative_borrow_rate_wads
-        );
-        println!(
-            " 📤  obligation_cumulative_borrow_rate_wads: {:?}",
-            obligation_cumulative_borrow_rate_wads
-        );
+        // println!(
+        //     " 📤  reserve_cumulative_borrow_rate_wads: {:?}",
+        //     reserve_cumulative_borrow_rate_wads
+        // );
+        // println!(
+        //     " 📤  obligation_cumulative_borrow_rate_wads: {:?}",
+        //     obligation_cumulative_borrow_rate_wads
+        // );
+
         /*
           =>
             new BigNumber(reserve.liquidity.cumulativeBorrowRateWads.toString()),
@@ -963,10 +973,10 @@ pub fn calculate_refreshed_obligation(
                 }
             }
         };
-        println!(
-            " 📤  borrow_amount_wads_with_interest: {:?}",
-            borrow_amount_wads_with_interest_u192
-        );
+        // println!(
+        //     " 📤  borrow_amount_wads_with_interest: {:?}",
+        //     borrow_amount_wads_with_interest_u192
+        // );
 
         let mut borrow_amount_wads_with_interest = U256::from(0u32);
 
@@ -976,10 +986,10 @@ pub fn calculate_refreshed_obligation(
         );
 
         let market_value = borrow_amount_wads_with_interest * price / decimals;
-        println!(" 📤  market_value: {:?}", market_value);
+        // println!(" 📤  market_value: {:?}", market_value);
 
         borrowed_value = borrowed_value + market_value;
-        println!(" 📤  borrowed_value: {:?}", borrowed_value);
+        // println!(" 📤  borrowed_value: {:?}", borrowed_value);
 
         let mut obl_borrow_borrowed_amount_wads = U256::from(0);
         decimal_to_u256(
@@ -994,16 +1004,16 @@ pub fn calculate_refreshed_obligation(
             market_value,
             symbol,
         };
-        println!("casted_borrow: {:?}", casted_borrow);
+        // println!("casted_borrow: {:?}", casted_borrow);
 
         borrows.push(casted_borrow);
     }
 
-    println!(" ✉️ : borrowed_value: {:?}", borrowed_value);
-    println!(" ✉️ : deposited_value: {:?}", deposited_value);
+    // println!(" ✉️ : borrowed_value: {:?}", borrowed_value);
+    // println!(" ✉️ : deposited_value: {:?}", deposited_value);
 
-    println!(" ✉️ : deposits: {:?}", deposits);
-    println!(" ✉️ : borrows: {:?}", borrows);
+    // println!(" ✉️ : deposits: {:?}", deposits);
+    // println!(" ✉️ : borrows: {:?}", borrows);
 
     let empty = U256::from(0u8);
     if deposited_value == empty || borrowed_value == empty {
@@ -1011,7 +1021,7 @@ pub fn calculate_refreshed_obligation(
     }
 
     let utilization_ratio = borrowed_value * U256::from(100) / deposited_value;
-    println!("utilization_ratio: {:?}", utilization_ratio);
+    // println!("utilization_ratio: {:?}", utilization_ratio);
 
     Some(RefreshedObligation {
         // pub deposited_value: u32,
@@ -1096,16 +1106,14 @@ async fn get_wallet_token_data(
 }
 
 async fn process_markets(client: Arc<Client>) {
-    let solend_cfg = client.solend_cfg.unwrap();
-    let markets_n = solend_cfg.markets.len();
+    let markets_list = client.solend_cfg.unwrap();
     let mut handles = vec![];
 
-    let solend_cfg = client.solend_cfg.unwrap();
+    // let solend_cfg = client.solend_cfg.unwrap();
 
-    for i in 0..markets_n {
-        let current_market = solend_cfg.markets[i].clone();
-
+    for current_market in markets_list {
         let c_client = Arc::clone(&client);
+
         let h = tokio::spawn(async move {
             let lending_market = current_market.address.clone();
 
@@ -1114,6 +1122,9 @@ async fn process_markets(client: Arc<Client>) {
                 c_client.get_obligations(lending_market.as_str()),
                 c_client.get_reserves(lending_market.as_str()),
             );
+            // println!("oracle_data: {:?}", oracle_data);
+            // println!("all_obligations: {:?}", all_obligations);
+            // println!("reserves: {:?}", reserves);
 
             let mut inner_handles = vec![];
 
@@ -1134,6 +1145,7 @@ async fn process_markets(client: Arc<Client>) {
                         &reserves,
                         &oracle_data,
                     );
+                    // println!("refreshed_obligation: {:?}", refreshed_obligation);
 
                     if refreshed_obligation.is_none() {
                         return;
@@ -1147,10 +1159,10 @@ async fn process_markets(client: Arc<Client>) {
                         refreshed_obligation.borrows,
                     );
 
-                    if borrowed_value <= unhealthy_borrow_value {
-                        println!("do nothing if obligation is healthy");
-                        return;
-                    }
+                    // if borrowed_value <= unhealthy_borrow_value {
+                    //     println!("do nothing if obligation is healthy");
+                    //     return;
+                    // }
 
                     // select repay token that has the highest market value
                     let selected_borrow = {
@@ -1190,31 +1202,41 @@ async fn process_markets(client: Arc<Client>) {
                         println!("skip toxic obligations caused by toxic oracle data");
                         return;
                     }
+
                     let selected_deposit = selected_deposit.unwrap();
                     let selected_borrow = selected_borrow.unwrap();
 
-                    println!(
-                        "obligation: {:} is underwater",
-                        obligation.pubkey.to_string()
-                    );
-                    println!("borrowed_value: {:} ", borrowed_value.to_string());
-                    println!(
-                        "unhealthy_borrow_value: {:} ",
-                        unhealthy_borrow_value.to_string()
-                    );
-                    println!("market addr: {:} ", lending_market);
+                    // println!(
+                    //     "obligation: {:} is underwater",
+                    //     obligation.pubkey.to_string()
+                    // );
+                    // println!("borrowed_value: {:} ", borrowed_value.to_string());
+                    // println!(
+                    //     "unhealthy_borrow_value: {:} ",
+                    //     unhealthy_borrow_value.to_string()
+                    // );
+                    // println!("market addr: {:} ", lending_market);
 
                     let wallet_address = c_client.config.signer.pubkey();
-                    println!(
-                        "
-                        wallet_address: {:?}
-                        selected_borrow.mint_address: {:?}
-                        selected_borrow.symbol: {:?}
-                    ",
-                        wallet_address,
-                        selected_borrow.mint_address,
-                        selected_borrow.symbol.clone(),
-                    );
+                    // println!(
+                    //     "
+                    //     wallet_address: {:?}
+                    //     selected_borrow.mint_address: {:?}
+                    //     selected_borrow.symbol: {:?}
+                    // ",
+                    //     wallet_address,
+                    //     selected_borrow.mint_address,
+                    //     selected_borrow.symbol.clone(),
+                    // );
+
+                    Client::get_or_create_account_data(
+                        &c_client.config.signer.pubkey(),
+                        &c_client.config.signer.pubkey(),
+                        &selected_borrow.mint_address,
+                        &c_client.config.rpc_client,
+                        &c_client.config.signer,
+                    ).await;
+                    // panic!("");
                     let retrieved_wallet_data = get_wallet_token_data(
                         &c_client,
                         wallet_address,
@@ -1224,10 +1246,10 @@ async fn process_markets(client: Arc<Client>) {
                     .await
                     .unwrap();
 
-                    println!("🛢 🛢 🛢 retrieved_wallet_data: {:?}", retrieved_wallet_data);
+                    // println!("🛢 🛢 🛢 retrieved_wallet_data: {:?}", retrieved_wallet_data);
 
-                    println!("selected_borrow: {:?}", &selected_borrow);
-                    println!("selected_deposit: {:?}", &selected_deposit);
+                    // println!("selected_borrow: {:?}", &selected_borrow);
+                    // println!("selected_deposit: {:?}", &selected_deposit);
 
                     // let u_zero = U256::from(0);
                     // if retrieved_wallet_data.balance == u_zero {
@@ -1256,7 +1278,7 @@ async fn process_markets(client: Arc<Client>) {
                             current_market.clone(),
                             &obligation,
                         )
-                        .await;
+                        .await.unwrap();
                 });
 
                 inner_handles.push(h);
@@ -1266,6 +1288,7 @@ async fn process_markets(client: Arc<Client>) {
                 inner_h.await.unwrap();
             }
         });
+
         handles.push(h);
     }
 
@@ -1274,6 +1297,7 @@ async fn process_markets(client: Arc<Client>) {
     }
 }
 
+#[inline(never)]
 pub async fn run_eternal_liquidator() {
     let mut solend_client = Client::new();
 
@@ -1290,6 +1314,7 @@ pub async fn run_eternal_liquidator() {
     }
 }
 
+#[inline(never)]
 pub async fn run_liquidator_iter() {
     let mut solend_client = Client::new();
 
