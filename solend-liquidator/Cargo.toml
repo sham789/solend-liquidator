@@ -33,6 +33,7 @@ switchboard-program = { path = "../overriden/switchboard-program-0.2.1" }
 switchboard-v2 = { path = "../overriden/switchboard-v2-0.1.10" }
 criterion = "0.3"
 either = "1.7.0"
+futures-retry = "0.6.0"
 
 
 [dev-dependencies]

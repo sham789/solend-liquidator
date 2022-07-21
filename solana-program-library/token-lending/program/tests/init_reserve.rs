@@ -19,7 +19,7 @@ use solend_program::{
 };
 
 #[tokio::test]
-async fn test_success() {
+async fn test_success_init_reserve() {
     let mut test = ProgramTest::new(
         "solend_program",
         solend_program::id(),

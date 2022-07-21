@@ -27,15 +27,14 @@ use pyth_sdk_solana;
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::rpc_config::RpcProgramAccountsConfig;
 use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
-use solana_program::instruction::Instruction;
 
 use solana_sdk::account::create_is_signer_account_infos;
-use solend_program::NULL_PUBKEY;
 use solend_program::instruction::{
     liquidate_obligation_and_redeem_reserve_collateral, refresh_obligation, refresh_reserve,
 };
-use solend_program::math::{Decimal, Rate};
+use solend_program::math::{Decimal, Rate, TryDiv};
 use solend_program::state::{Obligation, Reserve};
+use solend_program::NULL_PUBKEY;
 use spl_associated_token_account::get_associated_token_address;
 use spl_associated_token_account::instruction::create_associated_token_account;
 use switchboard_program::AggregatorState;
@@ -51,7 +50,7 @@ construct_uint! {
 }
 
 fn handle_error<E: std::error::Error>(e: E) -> RetryPolicy<E> {
-        RetryPolicy::WaitRetry(std::time::Duration::from_millis(150))
+    RetryPolicy::WaitRetry(std::time::Duration::from_millis(150))
 }
 
 pub struct Client {
@@ -71,7 +70,7 @@ pub fn get_config() -> Config {
         ..solana_cli_config::Config::default()
     };
 
-    let json_rpc_url = String::from("https://broken-dawn-field.solana-mainnet.quiknode.pro/52908360084c7e0666532c96647b9b239ec5cadf/");
+    let json_rpc_url = String::from("https://polished-patient-brook.solana-mainnet.quiknode.pro/57a057b48182876ac38c7fb2131d8418e0a92f43/");
 
     let signer = solana_sdk::signer::keypair::read_keypair_file(cli_config.keypair_path).unwrap();
 
@@ -149,15 +148,42 @@ impl Client {
     ) -> Vec<OracleData> {
         let solend_cfg = self.solend_cfg.unwrap();
 
+        let solend_cfg = Arc::new(solend_cfg.clone());
+
+        let rpc = Arc::new(get_config().rpc_client);
+
         let mut oracle_data_list = vec![];
+        let mut handles = vec![];
+
         for market_reserve in market_reserves {
-            if let Some(oracle_data) = self
-                .get_oracle_data(market_reserve, &solend_cfg.oracles)
-                .await
-            {
-                oracle_data_list.push(oracle_data);
-            }
+
+            let solend_cfg = Arc::clone(&solend_cfg);
+            let c_rpc = Arc::clone(&rpc);
+            let market_reserve = market_reserve.clone();
+
+            let h = tokio::spawn(async move {
+                if let Some(oracle_data) =
+                    Self::get_oracle_data(&c_rpc, &solend_cfg, market_reserve).await
+                {
+                    Some(oracle_data)
+                } else {
+                    None
+                }
+            });
+
+            handles.push(h);
         }
+
+        for h in handles {
+            match h.await.unwrap() {
+                Some(v) => {
+                    oracle_data_list.push(v);
+                },
+                None => { continue; }
+            }
+
+        }
+
         oracle_data_list
     }
 
@@ -166,13 +192,13 @@ impl Client {
     // const SWITCHBOARD_V2_ADDRESS: &'static str = "SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f";
 
     async fn get_oracle_data(
-        &self,
-        reserve: &model::Resef,
-        oracles: &Oracles,
+        rpc: &Arc<RpcClient>,
+        solend_cfg: &Arc<SolendConfig>,
+        reserve: model::Resef,
     ) -> Option<OracleData> {
         let oracle = {
             let mut v = model::Asset2::default();
-            for oracle_asset in &oracles.assets {
+            for oracle_asset in &solend_cfg.oracles.assets {
                 if oracle_asset.asset == reserve.asset {
                     v = oracle_asset.clone();
                     break;
@@ -181,7 +207,7 @@ impl Client {
             v
         };
 
-        let rpc: &RpcClient = &self.config.rpc_client;
+        // let rpc: &RpcClient = &self.config.rpc_client;
 
         // let price =
         let price = if !oracle.price_address.is_empty()
@@ -206,7 +232,18 @@ impl Client {
             let owner = info.owner.clone();
 
             if owner == *SWITCHBOARD_V1_ADDRESS {
-                let result = AggregatorState::try_from_slice(&info.data[1..]).unwrap();
+                // println!("byte len: {:?}", info.data.len());
+                // println!("bytes[0]: {:?}", info.data[0]);
+                // println!("bytes[1]: {:?}", info.data[1]);
+                // println!("AggregatorState::LEN : {:?}", AggregatorState);
+
+                let result = AggregatorState::try_from_slice(&info.data);
+
+                if result.is_err() {
+                    return None;
+                }
+
+                let result = result.unwrap();
                 println!(
                     "🎱 oracle: 2nd case: {:?}",
                     result.last_round_result.as_ref().unwrap().result.unwrap() as i64
@@ -246,7 +283,7 @@ impl Client {
             }
         };
 
-        let solend_cfg = self.solend_cfg.unwrap();
+        // let solend_cfg = self.solend_cfg.unwrap();
 
         match price {
             Some(price) => {
@@ -431,54 +468,82 @@ impl Client {
 
         let uniq_reserve_addresses: Vec<Pubkey> = uniq_reserve_addresses.into_iter().collect();
 
-//         selected_borrow: Borrow { borrow_reserve: 2ZzkFjFj2y1irs6JqPDUK2F2B2fdkiY9dazd8SaZ4tRK, borrow_amount_wads: 808082774, market_value: 80808277400, mint_address: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v, symbol: "USDC" }
-// selected_deposit: Deposit { deposit_reserve: H1hpwRQsWXpx18D7uCFgnqj1oAesgLC8H1cDu5oYdrpa, deposit_amount: 1299579052518, market_value: 2615, symbol: "AURY" }
+        println!("uniq_reserve_addresses: {:?}", uniq_reserve_addresses);
 
+        //         selected_borrow: Borrow { borrow_reserve: 2ZzkFjFj2y1irs6JqPDUK2F2B2fdkiY9dazd8SaZ4tRK, borrow_amount_wads: 808082774, market_value: 80808277400, mint_address: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v, symbol: "USDC" }
+        // selected_deposit: Deposit { deposit_reserve: H1hpwRQsWXpx18D7uCFgnqj1oAesgLC8H1cDu5oYdrpa, deposit_amount: 1299579052518, market_value: 2615, symbol: "AURY" }
 
         // const USDC_LIQUIDATION_AMOUNT_FRACTIONAL: u64 =
         //     USDC_BORROW_AMOUNT_FRACTIONAL * (LIQUIDATION_CLOSE_FACTOR as u64) / 100;
-        let liquidity_amount_fractional = 0u64;
+        // let liquidity_amount_fractional = 0u64;
+        let liquidity_amount_fractional = obligation
+            .inner
+            .borrowed_value
+            .try_div(100)
+            .unwrap()
+            .try_round_u64()
+            .unwrap();
 
         // like
         // USDC = borrow
         // SOL = deposit
         //
-        
 
         // let user_liquidity_pubkey = if spl_associated_token_account::get_associated_token_address()
         // let alice_pubkey = Pubkey::from_str("BgvYtJEfmZYdVKiptmMjxGzv8iQoo4MWjsP3QsTkhhxa").unwrap();
         // let account_data = rpc_client.get_account_data(&alice_pubkey).await?;
         //
-        
-        async fn get_or_substitute_account_data(
-            funding_address: &Pubkey, 
-            wallet_address: &Pubkey, 
-            spl_token_mint_address: &Pubkey
-        ) -> Pubkey {
-            let associated_token_address = spl_associated_token_account::get_associated_token_address(
-                wallet_address,
-                spl_token_mint_address,
-            );
-            let leak_associated_token_address: &'static _ = Box::leak(Box::new(associated_token_address.clone()));
 
-            let token_account = FutureRetry::new(
-                move || {
-                    let account_data = rpc_client.get_account_data(&leak_associated_token_address).await?;
-                    
-                    if account_data.is_empty() {
-                        let ix = 
-                    } else {
-                        let 
-                    }
-                },
+        async fn get_or_substitute_account_data(
+            funding_address: &Pubkey,
+            wallet_address: &Pubkey,
+            spl_token_mint_address: &Pubkey,
+            rpc_client: &RpcClient,
+            signer: &Keypair,
+        ) -> Pubkey {
+            let associated_token_address =
+                spl_associated_token_account::get_associated_token_address(
+                    wallet_address,
+                    spl_token_mint_address,
+                );
+            let leak_associated_token_address: &'static _ =
+                Box::leak(Box::new(associated_token_address.clone()));
+
+            let (account_data, _) = FutureRetry::new(
+                move || rpc_client.get_account_data(&leak_associated_token_address),
                 handle_error,
-            ).await;
+            )
+            .await
+            .unwrap();
+
+            if account_data.is_empty() {
+                let ix = spl_associated_token_account::instruction::create_associated_token_account(
+                    funding_address,
+                    wallet_address,
+                    spl_token_mint_address,
+                );
+
+                let recent_blockhash = rpc_client.get_latest_blockhash().await.unwrap();
+                let mut transaction = Transaction::new_with_payer(&[ix], Some(&signer.pubkey()));
+
+                transaction.sign(&vec![signer], recent_blockhash);
+
+                let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
+
+                let _ = FutureRetry::new(
+                    move || rpc_client.send_and_confirm_transaction(transaction),
+                    handle_error,
+                )
+                .await
+                .unwrap();
+
+                drop(transaction);
+            }
 
             drop(leak_associated_token_address);
 
-
+            associated_token_address
         }
-
 
         let mut transaction = Transaction::new_with_payer(
             &[
@@ -486,7 +551,7 @@ impl Client {
                     solend_program::id(),
                     obligation.pubkey,
                     // vec![sol_test_reserve.pubkey, usdc_test_reserve.pubkey],
-                    uniq_reserve_addresses
+                    uniq_reserve_addresses,
                 ),
                 liquidate_obligation_and_redeem_reserve_collateral(
                     solend_program::id(),
@@ -494,10 +559,25 @@ impl Client {
                     liquidity_amount_fractional,
                     // just a spl_token::state::Token account
                     // usdc_test_reserve.user_liquidity_pubkey,
-                    NULL_PUBKEY,
-                    // just a spl_token::state::Token account
-                    // sol_test_reserve.user_collateral_pubkey,
-                    NULL_PUBKEY,
+                    get_or_substitute_account_data(
+                        // funding_address: &Pubkey,
+                        // wallet_address: &Pubkey,
+                        // spl_token_mint_address: &Pubkey
+                        &payer_pubkey,
+                        &payer_pubkey,
+                        &selected_borrow.mint_address,
+                        &self.config.rpc_client,
+                        &self.config.signer,
+                    )
+                    .await,
+                    get_or_substitute_account_data(
+                        &payer_pubkey,
+                        &payer_pubkey,
+                        &selected_deposit.deposit_reserve,
+                        &self.config.rpc_client,
+                        &self.config.signer,
+                    )
+                    .await,
                     // sol_test_reserve.user_liquidity_pubkey,
                     NULL_PUBKEY,
                     // usdc_test_reserve.pubkey,
@@ -674,7 +754,6 @@ impl Client {
         list[idx].clone()
     }
 }
-
 
 // type Borrow = {
 //   borrowReserve: PublicKey;
@@ -1150,22 +1229,22 @@ async fn process_markets(client: Arc<Client>) {
                     println!("selected_borrow: {:?}", &selected_borrow);
                     println!("selected_deposit: {:?}", &selected_deposit);
 
-                    let u_zero = U256::from(0);
-                    if retrieved_wallet_data.balance == u_zero {
-                        println!(
-                            "insufficient {:} to liquidate obligation {:} in market: {:}",
-                            selected_borrow.symbol,
-                            obligation.pubkey.to_string(),
-                            lending_market
-                        );
-                        return;
-                    } else if retrieved_wallet_data.balance < u_zero {
-                        println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market);
-                        println!(
-                            "potentially network error or token account does not exist in wallet"
-                        );
-                        return;
-                    }
+                    // let u_zero = U256::from(0);
+                    // if retrieved_wallet_data.balance == u_zero {
+                    //     println!(
+                    //         "insufficient {:} to liquidate obligation {:} in market: {:}",
+                    //         selected_borrow.symbol,
+                    //         obligation.pubkey.to_string(),
+                    //         lending_market
+                    //     );
+                    //     return;
+                    // } else if retrieved_wallet_data.balance < u_zero {
+                    //     println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market);
+                    //     println!(
+                    //         "potentially network error or token account does not exist in wallet"
+                    //     );
+                    //     return;
+                    // }
 
                     c_client
                         .liquidate_and_redeem(
