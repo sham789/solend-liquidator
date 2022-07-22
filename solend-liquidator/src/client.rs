@@ -1159,10 +1159,10 @@ async fn process_markets(client: Arc<Client>) {
                         refreshed_obligation.borrows,
                     );
 
-                    // if borrowed_value <= unhealthy_borrow_value {
-                    //     println!("do nothing if obligation is healthy");
-                    //     return;
-                    // }
+                    if borrowed_value <= unhealthy_borrow_value {
+                        println!("do nothing if obligation is healthy");
+                        return;
+                    }
 
                     // select repay token that has the highest market value
                     let selected_borrow = {
@@ -1251,22 +1251,22 @@ async fn process_markets(client: Arc<Client>) {
                     // println!("selected_borrow: {:?}", &selected_borrow);
                     // println!("selected_deposit: {:?}", &selected_deposit);
 
-                    // let u_zero = U256::from(0);
-                    // if retrieved_wallet_data.balance == u_zero {
-                    //     println!(
-                    //         "insufficient {:} to liquidate obligation {:} in market: {:}",
-                    //         selected_borrow.symbol,
-                    //         obligation.pubkey.to_string(),
-                    //         lending_market
-                    //     );
-                    //     return;
-                    // } else if retrieved_wallet_data.balance < u_zero {
-                    //     println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market);
-                    //     println!(
-                    //         "potentially network error or token account does not exist in wallet"
-                    //     );
-                    //     return;
-                    // }
+                    let u_zero = U256::from(0);
+                    if retrieved_wallet_data.balance == u_zero {
+                        println!(
+                            "insufficient {:} to liquidate obligation {:} in market: {:}",
+                            selected_borrow.symbol,
+                            obligation.pubkey.to_string(),
+                            lending_market
+                        );
+                        return;
+                    } else if retrieved_wallet_data.balance < u_zero {
+                        println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market);
+                        println!(
+                            "potentially network error or token account does not exist in wallet"
+                        );
+                        return;
+                    }
 
                     c_client
                         .liquidate_and_redeem(
