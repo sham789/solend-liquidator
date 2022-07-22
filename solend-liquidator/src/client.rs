@@ -554,8 +554,10 @@ impl Client {
 
         let mut uniq_reserve_addresses: HashSet<Pubkey> = HashSet::new();
 
-        for reserve in vec![deposit_reserves, borrow_reserves].concat() {
-            uniq_reserve_addresses.insert(reserve);
+        let total_reserves = vec![deposit_reserves, borrow_reserves].concat();
+
+        for reserve in &total_reserves {
+            uniq_reserve_addresses.insert(reserve.clone());
         }
 
         let uniq_reserve_addresses: Vec<Pubkey> = uniq_reserve_addresses.into_iter().collect();
@@ -590,9 +592,9 @@ impl Client {
             // program_id,
             // obligation_pubkey,
             // reserve_pubkeys
-            SOLEND_PROGRAM_ID.clone(),
+            *SOLEND_PROGRAM_ID,
             obligation.pubkey,
-            vec![deposit_reserves, borrow_reserves].concat(),
+            total_reserves
         );
         ixs.push(refresh_obligation_ix);
 
@@ -731,10 +733,10 @@ impl Client {
 
         match r {
             Ok((r, _)) => {
-                println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
+                println!(" 🚀 ✅ 🚀  broadcast: signature: {:?}", r);
             }
             Err(e) => {
-                println!(" 🚀 ❌ 🚀 broadcast: err: {:?}", e);
+                println!(" 🚀 ❌ 🚀  broadcast: err: {:?}", e);
             }
         }
 
@@ -839,6 +841,7 @@ pub fn calculate_refreshed_obligation(
             token_oracle.decimals,
             token_oracle.symbol.clone(),
         );
+        // println!("token_oracle: {:?}", token_oracle);
 
         let reserve = all_reserves
             .iter()
@@ -862,20 +865,20 @@ pub fn calculate_refreshed_obligation(
         // println!(" 📥  market_value: {:?}", market_value);
 
         let loan_to_value_rate = U256::from(reserve.inner.config.loan_to_value_ratio);
-        // println!(" 📥 : loan_to_value_rate: {:?}", loan_to_value_rate);
+        println!(" 📥 : loan_to_value_rate: {:?}", loan_to_value_rate);
 
         let liquidation_threshold_rate = U256::from(reserve.inner.config.liquidation_threshold);
-        // println!(
-        //     " 📥  liquidation_threshold_rate: {:?}",
-        //     liquidation_threshold_rate
-        // );
+        println!(
+            " 📥  liquidation_threshold_rate: {:?}",
+            liquidation_threshold_rate
+        );
 
         deposited_value = deposited_value.add(market_value);
         // println!(" 📥  deposited_value: {:?}", deposited_value);
-        allowed_borrow_value = allowed_borrow_value.add(market_value * loan_to_value_rate);
+        allowed_borrow_value = allowed_borrow_value.add(market_value * loan_to_value_rate / 100);
         // println!(" 📥  allowed_borrow_value: {:?}", allowed_borrow_value);
         unhealthy_borrow_value =
-            unhealthy_borrow_value.add(market_value * liquidation_threshold_rate);
+            unhealthy_borrow_value.add(market_value * liquidation_threshold_rate / 100);
         // println!(" 📥  unhealthy_borrow_value: {:?}", unhealthy_borrow_value);
 
         let casted_depo = Deposit {
