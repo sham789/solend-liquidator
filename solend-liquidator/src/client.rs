@@ -22,6 +22,8 @@ use {
 };
 
 use futures_retry::{FutureFactory, FutureRetry, RetryPolicy};
+use either::Either;
+use parking_lot::RwLock;
 
 use log::Log;
 use pyth_sdk_solana;
@@ -305,7 +307,22 @@ impl Client {
         }
     }
 
-    pub async fn get_obligations(&self, market_address: &str) -> Vec<Enhanced<Obligation>> {
+    pub async fn get_obligation(&self, data_account: Either<&str, Pubkey>) -> Option<Enhanced<Obligation>> {
+        let data_pubkey = match data_account {
+            Either::Left(v) => Pubkey::from_str(v).unwrap(),
+            Either::Right(v) => v
+        };
+
+        match self.config.rpc_client.get_account_data(&data_pubkey).await {
+            Ok(data_account) => {
+                let obligation = Obligation::unpack(&data_account).unwrap();
+                Some(Enhanced { inner: obligation, pubkey: data_pubkey })
+            },
+            _ => None
+        }
+    }
+
+    pub async fn get_obligations(&self, market_address: &str) -> HashMap<Pubkey, Arc<RwLock<Enhanced<Obligation>>>> {
         let rpc: &RpcClient = &self.config.rpc_client;
         let _solend_cfg = self.solend_cfg.unwrap();
 
@@ -339,29 +356,32 @@ impl Client {
             )
             .await;
 
+        let mut obligations = HashMap::new();
+
         if obligations_encoded.is_err() {
-            // panic!("none got");
-            return vec![];
+            return obligations;
         }
 
         let obligations_encoded = obligations_encoded.unwrap();
-
-        // let obligation = Obligation::unpack(&);
-
-        let mut obligations_list = vec![];
+        // let mut obligations_list = vec![];
 
         for obligation_encoded in &obligations_encoded {
             let &(obl_pubkey, ref obl_account) = obligation_encoded;
             let obligation = Obligation::unpack(&obl_account.data).unwrap();
 
-            obligations_list.push(Enhanced {
+            // obligations_list.push(Enhanced {
+            //     inner: obligation,
+            //     pubkey: obl_pubkey,
+            // });
+
+            let obl = Arc::new(RwLock::new(Enhanced {
                 inner: obligation,
                 pubkey: obl_pubkey,
-            });
+            }));
+            obligations.insert(obl_pubkey.clone(), obl);
         }
 
-        obligations_list
-        // println!("obligation: {:?}", resp);
+        obligations
     }
 
     pub async fn get_reserves(&self, market_address: &str) -> Vec<Enhanced<Reserve>> {
@@ -513,7 +533,7 @@ impl Client {
         selected_deposit: &Deposit,
         lending_market: Market,
         obligation: &Enhanced<Obligation>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _solend_cfg = self.solend_cfg.unwrap();
         let payer_pubkey = self.config.signer.pubkey();
 
@@ -1102,10 +1122,10 @@ async fn process_markets(client: Arc<Client>) {
 
             let mut inner_handles = vec![];
 
-            for obligation in &all_obligations {
+            for (_, raw_obligation) in &all_obligations {
                 let oracle_data = oracle_data.clone();
                 let c_client = Arc::clone(&c_client);
-                let obligation = obligation.clone();
+                let obligation = Arc::clone(&raw_obligation);
                 let current_market = current_market.clone();
                 let lending_market = lending_market.clone();
                 let reserves = reserves.clone();
@@ -1113,11 +1133,13 @@ async fn process_markets(client: Arc<Client>) {
                 let logger = Arc::clone(&logger);
 
                 let h = tokio::spawn(async move {
+                    let r_obligation = obligation.read().clone();
+                    
                     let refreshed_obligation = calculate_refreshed_obligation(
                         // obligation: &Obligation,
                         // all_reserves: &Vec<Enhanced<Reserve>>,
                         // tokens_oracle: &Vec<OracleData>,
-                        &obligation.inner,
+                        &r_obligation.inner,
                         &reserves,
                         &oracle_data,
                         &logger,
@@ -1183,14 +1205,13 @@ async fn process_markets(client: Arc<Client>) {
                     let selected_deposit = selected_deposit.unwrap();
                     let selected_borrow = selected_borrow.unwrap();
 
-
                     println!(
                         "obligation: {:} is underwater",
-                        obligation.pubkey.to_string()
+                        r_obligation.pubkey.to_string()
                     ); 
                     println!(
                         "obligation: {:?}",
-                        obligation.inner
+                        r_obligation.inner
                     ); 
                     println!("borrowed_value: {:} ", borrowed_value.to_string());
                     println!(
@@ -1242,26 +1263,36 @@ async fn process_markets(client: Arc<Client>) {
                         println!(
                             "insufficient {:} to liquidate obligation {:} in market: {:}",
                             selected_borrow.symbol,
-                            obligation.pubkey.to_string(),
+                            r_obligation.pubkey.to_string(),
                             lending_market
                         );
                         return;
                     } else if retrieved_wallet_data.balance < u_zero {
-                        println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market);
+                        println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, r_obligation.pubkey.to_string(), lending_market);
                         println!("potentially network error or token account does not exist in wallet");
                         return;
                     }
 
-                    c_client
+                    let liquidation_result = c_client
                         .liquidate_and_redeem(
                             &retrieved_wallet_data,
                             &selected_borrow,
                             &selected_deposit,
                             current_market.clone(),
-                            &obligation,
+                            &r_obligation,
                         )
-                        .await
-                        .unwrap();
+                        .await;
+
+                    if liquidation_result.is_ok() {
+                        println!("liquidation of {:?} went successful, updating the obligation *in-place*...", r_obligation.pubkey.to_string());
+                        
+                        let updated_obligation = c_client.get_obligation(Either::Right(r_obligation.pubkey)).await.unwrap();
+
+                        let mut w_obligation = obligation.write();
+                        *w_obligation = updated_obligation;
+
+                        println!("obligation {:?} is updated...", r_obligation.pubkey.to_string());
+                    }
                 });
 
                 inner_handles.push(h);

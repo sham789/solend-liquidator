@@ -3799,6 +3799,7 @@ dependencies = [
  "hyper-tls",
  "lazy_static",
  "log",
+ "parking_lot 0.12.1",
  "pyth-sdk-solana",
  "serde",
  "serde_derive",
