@@ -865,13 +865,13 @@ pub fn calculate_refreshed_obligation(
         // println!(" 📥  market_value: {:?}", market_value);
 
         let loan_to_value_rate = U256::from(reserve.inner.config.loan_to_value_ratio);
-        println!(" 📥 : loan_to_value_rate: {:?}", loan_to_value_rate);
+        // println!(" 📥 : loan_to_value_rate: {:?}", loan_to_value_rate);
 
         let liquidation_threshold_rate = U256::from(reserve.inner.config.liquidation_threshold);
-        println!(
-            " 📥  liquidation_threshold_rate: {:?}",
-            liquidation_threshold_rate
-        );
+        // println!(
+        //     " 📥  liquidation_threshold_rate: {:?}",
+        //     liquidation_threshold_rate
+        // );
 
         deposited_value = deposited_value.add(market_value);
         // println!(" 📥  deposited_value: {:?}", deposited_value);
@@ -1147,13 +1147,15 @@ async fn process_markets(client: Arc<Client>) {
                         &oracle_data,
                         &logger,
                     );
-                    // println!("refreshed_obligation: {:?}", refreshed_obligation);
 
                     if refreshed_obligation.is_none() {
                         return;
                     }
 
                     let refreshed_obligation = refreshed_obligation.unwrap();
+                    println!("refreshed_obligation_pubkey: {:?}", r_obligation.pubkey.to_string());
+                    // println!("refreshed_obligation: {:?}", refreshed_obligation);
+
                     let (borrowed_value, unhealthy_borrow_value, deposits, borrows) = (
                         refreshed_obligation.borrowed_value,
                         refreshed_obligation.unhealthy_borrow_value,
