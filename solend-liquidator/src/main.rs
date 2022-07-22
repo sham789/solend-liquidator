@@ -1,11 +1,29 @@
 mod client;
 mod helpers;
+mod log;
 mod model;
 mod utils;
 
-use crate::client::run_eternal_liquidator;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    #[clap(short, long, value_parser, default_value_t = String::from("eternal"))]
+    mode: String,
+    #[clap(short, long, value_parser, default_value_t = String::from("./private/liquidator_main.json"))]
+    keypair_path: String,
+}
+
+use crate::client::{run_eternal_liquidator, run_liquidator_iter};
 
 #[tokio::main]
 async fn main() {
-    run_eternal_liquidator().await;
+    let args = Args::parse();
+
+    match args.mode.as_str() {
+        "eternal" => run_eternal_liquidator(args.keypair_path).await,
+        "iter" => run_liquidator_iter(args.keypair_path).await,
+        _ => panic!("specified mode is unavaiable"),
+    };
 }

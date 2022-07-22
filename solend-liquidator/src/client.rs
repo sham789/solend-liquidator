@@ -21,28 +21,26 @@ use {
     std::str::FromStr,
 };
 
-use futures_retry::{FutureFactory, FutureRetry, RetryPolicy, StreamRetryExt};
+use futures_retry::{FutureFactory, FutureRetry, RetryPolicy};
 
 use pyth_sdk_solana;
 use solana_account_decoder::UiAccountEncoding;
-use solana_client::rpc_config::RpcProgramAccountsConfig;
+use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcSendTransactionConfig};
 use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
 
 use solana_program::instruction::Instruction;
 use solana_sdk::account::create_is_signer_account_infos;
-use solend_program::instruction::{
-    liquidate_obligation_and_redeem_reserve_collateral, refresh_obligation, refresh_reserve,
-};
-use solend_program::math::{Decimal, Rate, TryDiv};
+use solana_sdk::commitment_config::CommitmentLevel;
+
+use solend_program::math::{Decimal, Rate};
 use solend_program::state::{Obligation, Reserve};
-use solend_program::NULL_PUBKEY;
+
 use spl_associated_token_account::get_associated_token_address;
-use spl_associated_token_account::instruction::create_associated_token_account;
+
 use switchboard_program::AggregatorState;
 use uint::construct_uint;
 
-// use switchboard_program::switchboard_protos::protos::aggregator_state::AggregatorState;
-
+use crate::log::Logger;
 use crate::model::{self, Market, SolendConfig};
 use crate::utils::body_to_string;
 
@@ -50,7 +48,7 @@ construct_uint! {
     pub struct U256(4);
 }
 
-fn handle_error<E: std::error::Error>(e: E) -> RetryPolicy<E> {
+fn handle_error<E: std::error::Error>(_e: E) -> RetryPolicy<E> {
     RetryPolicy::WaitRetry(std::time::Duration::from_millis(150))
 }
 
@@ -58,16 +56,17 @@ pub struct Client {
     client: HyperClient<HttpsConnector<hyper::client::HttpConnector>>,
     config: Config,
     solend_cfg: Option<&'static SolendConfig>,
+    logger: Arc<Box<Logger>>,
 }
 
 pub struct Config {
-    rpc_client: RpcClient,
+    rpc_client: Arc<Box<RpcClient>>,
     signer: Box<Keypair>,
 }
 
-pub fn get_config() -> Config {
+pub fn get_config(keypair_path: String) -> Config {
     let cli_config = solana_cli_config::Config {
-        keypair_path: String::from("./private/liquidator_main.json"),
+        keypair_path,
         ..solana_cli_config::Config::default()
     };
 
@@ -76,7 +75,10 @@ pub fn get_config() -> Config {
     let signer = solana_sdk::signer::keypair::read_keypair_file(cli_config.keypair_path).unwrap();
 
     Config {
-        rpc_client: RpcClient::new_with_commitment(json_rpc_url, CommitmentConfig::confirmed()),
+        rpc_client: Arc::new(Box::new(RpcClient::new_with_commitment(
+            json_rpc_url,
+            CommitmentConfig::confirmed(),
+        ))),
         signer: Box::new(signer),
         // lending_program_id,
         // verbose,
@@ -113,14 +115,15 @@ lazy_static::lazy_static! {
 impl Client {
     const CFG_PRESET: &'static str = "production";
 
-    pub fn new() -> Self {
+    pub fn new(keypair_path: String) -> Self {
         let client = HyperClient::builder().build::<_, Body>(HttpsConnector::new());
-        let config = get_config();
+        let config = get_config(keypair_path);
 
         Self {
             client,
             config,
             solend_cfg: None,
+            logger: Arc::new(Box::new(Logger::new())),
         }
     }
 
@@ -150,8 +153,7 @@ impl Client {
         &self,
         market_reserves: &Vec<model::Resef>,
     ) -> Vec<OracleData> {
-        let rpc = Arc::new(get_config().rpc_client);
-
+        let rpc = &self.config.rpc_client;
         let mut oracle_data_list = vec![];
         let mut handles = vec![];
 
@@ -188,7 +190,10 @@ impl Client {
     // const SWITCHBOARD_V1_ADDRESS: &'static str = "DtmE9D2CSB4L5D6A15mraeEjrGMm6auWVzgaD8hK2tZM";
     // const SWITCHBOARD_V2_ADDRESS: &'static str = "SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f";
 
-    async fn get_oracle_data(rpc: &Arc<RpcClient>, reserve: &model::Resef) -> Option<OracleData> {
+    async fn get_oracle_data(
+        rpc: &Arc<Box<RpcClient>>,
+        reserve: &model::Resef,
+    ) -> Option<OracleData> {
         // let oracle = {
         //     let mut v = Default::default();
         //     for oracle_asset in &reserve {
@@ -217,6 +222,7 @@ impl Client {
             //     "🎱 oracle: 1st case: {:?}",
             //     result.get_current_price_unchecked().price
             // );
+            // logger
             Some(U256::from(result.get_current_price_unchecked().price))
         } else {
             let price_public_key = Pubkey::from_str(reserve.switchboard_oracle.as_str()).unwrap();
@@ -267,10 +273,10 @@ impl Client {
                 //     Err(_) => None,
                 // }
             } else {
-                println!(
-                    "🎱 oracle: unrecognized switchboard owner address: {:}",
-                    owner
-                );
+                // println!(
+                //     "🎱 oracle: unrecognized switchboard owner address: {:}",
+                //     owner
+                // );
                 None
             }
         };
@@ -298,7 +304,7 @@ impl Client {
 
     pub async fn get_obligations(&self, market_address: &str) -> Vec<Enhanced<Obligation>> {
         let rpc: &RpcClient = &self.config.rpc_client;
-        let solend_cfg = self.solend_cfg.unwrap();
+        let _solend_cfg = self.solend_cfg.unwrap();
 
         let program_id = SOLEND_PROGRAM_ID.clone();
         let market_address = Pubkey::from_str(market_address).unwrap();
@@ -357,7 +363,7 @@ impl Client {
 
     pub async fn get_reserves(&self, market_address: &str) -> Vec<Enhanced<Reserve>> {
         let rpc: &RpcClient = &self.config.rpc_client;
-        let solend_cfg = self.solend_cfg.unwrap();
+        let _solend_cfg = self.solend_cfg.unwrap();
 
         let program_id = SOLEND_PROGRAM_ID.clone();
         let market_address = Pubkey::from_str(market_address).unwrap();
@@ -437,7 +443,6 @@ impl Client {
         .unwrap();
 
         if account_data.is_empty() {
-
             let ix = spl_associated_token_account::instruction::create_associated_token_account(
                 funding_address,
                 wallet_address,
@@ -457,7 +462,10 @@ impl Client {
             // )
             // .await
             // .unwrap();
-            let r = rpc_client.send_and_confirm_transaction(transaction).await.unwrap();
+            let r = rpc_client
+                .send_and_confirm_transaction(transaction)
+                .await
+                .unwrap();
 
             println!("tx: {:?}", r);
             rpc_client
@@ -478,7 +486,7 @@ impl Client {
         wallet_address: &Pubkey,
         spl_token_mint_address: &Pubkey,
         rpc_client: &RpcClient,
-        signer: &Keypair,
+        _signer: &Keypair,
     ) -> (Pubkey, Option<Instruction>) {
         let associated_token_address = spl_associated_token_account::get_associated_token_address(
             wallet_address,
@@ -543,7 +551,7 @@ impl Client {
         lending_market: Market,
         obligation: &Enhanced<Obligation>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let solend_cfg = self.solend_cfg.unwrap();
+        let _solend_cfg = self.solend_cfg.unwrap();
         let payer_pubkey = self.config.signer.pubkey();
 
         let repay_token_symbol = &selected_borrow.symbol;
@@ -596,7 +604,7 @@ impl Client {
             ixs.push(refresh_reserve_ix);
         }
 
-        let refresh_obligation_ix = solend_program::instruction::refresh_obligation(
+        let _refresh_obligation_ix = solend_program::instruction::refresh_obligation(
             // program_id,
             // obligation_pubkey,
             // reserve_pubkeys
@@ -729,20 +737,32 @@ impl Client {
             move || {
                 self.config
                     .rpc_client
-                    .send_and_confirm_transaction(transaction)
+                    .send_and_confirm_transaction_with_spinner_and_config(
+                        transaction,
+                        CommitmentConfig {
+                            commitment: CommitmentLevel::Confirmed,
+                        },
+                        RpcSendTransactionConfig {
+                            skip_preflight: false,
+                            ..RpcSendTransactionConfig::default()
+                        },
+                    )
             },
             handle_error,
         )
         .await;
-        
+
+        panic!("1");
         // println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
 
         match r {
             Ok((r, _)) => {
-                println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
+                self.logger
+                    .info(format!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r));
             }
             Err(e) => {
-                println!(" 🚀 ❌ 🚀 broadcast: err: {:?}", e)
+                self.logger
+                    .warn(format!(" 🚀 ❌ 🚀 broadcast: err: {:?}", e));
             }
         }
 
@@ -814,6 +834,7 @@ pub fn calculate_refreshed_obligation(
     obligation: &Obligation,
     all_reserves: &Vec<Enhanced<Reserve>>,
     tokens_oracle: &Vec<OracleData>,
+    logger: &Arc<Box<Logger>>,
 ) -> Option<RefreshedObligation> {
     let mut deposited_value = U256::from(0u32);
     let mut borrowed_value = U256::from(0u32);
@@ -830,11 +851,11 @@ pub fn calculate_refreshed_obligation(
             .position(|x| x.reserve_address == deposit.deposit_reserve);
 
         if token_oracle.is_none() {
-            println!(
+            logger.warn(format!(
                 " 📥  Missing token info for reserve {:}, skipping this obligation. \n
             Please restart liquidator to fetch latest configs from /v1/config",
                 deposit.deposit_reserve
-            );
+            ));
             continue;
         }
 
@@ -1113,6 +1134,7 @@ async fn process_markets(client: Arc<Client>) {
 
     for current_market in markets_list {
         let c_client = Arc::clone(&client);
+        let logger = Arc::clone(&c_client.logger);
 
         let h = tokio::spawn(async move {
             let lending_market = current_market.address.clone();
@@ -1136,6 +1158,8 @@ async fn process_markets(client: Arc<Client>) {
                 let lending_market = lending_market.clone();
                 let reserves = reserves.clone();
 
+                let logger = Arc::clone(&logger);
+
                 let h = tokio::spawn(async move {
                     let refreshed_obligation = calculate_refreshed_obligation(
                         // obligation: &Obligation,
@@ -1144,6 +1168,7 @@ async fn process_markets(client: Arc<Client>) {
                         &obligation.inner,
                         &reserves,
                         &oracle_data,
+                        &logger,
                     );
                     // println!("refreshed_obligation: {:?}", refreshed_obligation);
 
@@ -1160,7 +1185,8 @@ async fn process_markets(client: Arc<Client>) {
                     );
 
                     if borrowed_value <= unhealthy_borrow_value {
-                        println!("do nothing if obligation is healthy");
+                        logger.trace("do nothing if obligation is healthy");
+                        logger.info("do nothing if obligation is healthy");
                         return;
                     }
 
@@ -1199,35 +1225,35 @@ async fn process_markets(client: Arc<Client>) {
                     };
 
                     if selected_deposit.is_none() || selected_borrow.is_none() {
-                        println!("skip toxic obligations caused by toxic oracle data");
+                        logger.info("skip toxic obligations caused by toxic oracle data");
                         return;
                     }
 
                     let selected_deposit = selected_deposit.unwrap();
                     let selected_borrow = selected_borrow.unwrap();
 
-                    // println!(
-                    //     "obligation: {:} is underwater",
-                    //     obligation.pubkey.to_string()
-                    // );
-                    // println!("borrowed_value: {:} ", borrowed_value.to_string());
-                    // println!(
-                    //     "unhealthy_borrow_value: {:} ",
-                    //     unhealthy_borrow_value.to_string()
-                    // );
-                    // println!("market addr: {:} ", lending_market);
+                    println!(
+                        "obligation: {:} is underwater",
+                        obligation.pubkey.to_string()
+                    );
+                    println!("borrowed_value: {:} ", borrowed_value.to_string());
+                    println!(
+                        "unhealthy_borrow_value: {:} ",
+                        unhealthy_borrow_value.to_string()
+                    );
+                    println!("market addr: {:} ", lending_market);
 
                     let wallet_address = c_client.config.signer.pubkey();
-                    // println!(
-                    //     "
-                    //     wallet_address: {:?}
-                    //     selected_borrow.mint_address: {:?}
-                    //     selected_borrow.symbol: {:?}
-                    // ",
-                    //     wallet_address,
-                    //     selected_borrow.mint_address,
-                    //     selected_borrow.symbol.clone(),
-                    // );
+                    println!(
+                        "
+                        wallet_address: {:?}
+                        selected_borrow.mint_address: {:?}
+                        selected_borrow.symbol: {:?}
+                    ",
+                        wallet_address,
+                        selected_borrow.mint_address,
+                        selected_borrow.symbol.clone(),
+                    );
 
                     Client::get_or_create_account_data(
                         &c_client.config.signer.pubkey(),
@@ -1235,7 +1261,8 @@ async fn process_markets(client: Arc<Client>) {
                         &selected_borrow.mint_address,
                         &c_client.config.rpc_client,
                         &c_client.config.signer,
-                    ).await;
+                    )
+                    .await;
                     // panic!("");
                     let retrieved_wallet_data = get_wallet_token_data(
                         &c_client,
@@ -1246,24 +1273,24 @@ async fn process_markets(client: Arc<Client>) {
                     .await
                     .unwrap();
 
-                    // println!("🛢 🛢 🛢 retrieved_wallet_data: {:?}", retrieved_wallet_data);
+                    println!("🛢 🛢 🛢 retrieved_wallet_data: {:?}", retrieved_wallet_data);
 
-                    // println!("selected_borrow: {:?}", &selected_borrow);
-                    // println!("selected_deposit: {:?}", &selected_deposit);
+                    println!("selected_borrow: {:?}", &selected_borrow);
+                    println!("selected_deposit: {:?}", &selected_deposit);
 
                     let u_zero = U256::from(0);
                     if retrieved_wallet_data.balance == u_zero {
-                        println!(
+                        logger.warn(format!(
                             "insufficient {:} to liquidate obligation {:} in market: {:}",
                             selected_borrow.symbol,
                             obligation.pubkey.to_string(),
                             lending_market
-                        );
+                        ));
                         return;
                     } else if retrieved_wallet_data.balance < u_zero {
-                        println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market);
-                        println!(
-                            "potentially network error or token account does not exist in wallet"
+                        logger.warn(format!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market));
+                        logger.warn(
+                            "potentially network error or token account does not exist in wallet",
                         );
                         return;
                     }
@@ -1278,7 +1305,8 @@ async fn process_markets(client: Arc<Client>) {
                             current_market.clone(),
                             &obligation,
                         )
-                        .await.unwrap();
+                        .await
+                        .unwrap();
                 });
 
                 inner_handles.push(h);
@@ -1292,14 +1320,20 @@ async fn process_markets(client: Arc<Client>) {
         handles.push(h);
     }
 
+    let total_n = handles.len();
+    println!("total n: {:?}", total_n);
+
+    let mut cur = 0usize;
     for h in handles {
-        h.await;
+        h.await.unwrap();
+        cur += 1;
+
+        println!("current iters: {:?}", cur);
     }
 }
 
-#[inline(never)]
-pub async fn run_eternal_liquidator() {
-    let mut solend_client = Client::new();
+pub async fn run_eternal_liquidator(keypair_path: String) {
+    let mut solend_client = Client::new(keypair_path);
 
     let solend_cfg = solend_client.get_solend_config().await;
     let solend_cfg: &'static _ = Box::leak(Box::new(solend_cfg));
@@ -1314,9 +1348,8 @@ pub async fn run_eternal_liquidator() {
     }
 }
 
-#[inline(never)]
-pub async fn run_liquidator_iter() {
-    let mut solend_client = Client::new();
+pub async fn run_liquidator_iter(keypair_path: String) {
+    let mut solend_client = Client::new(keypair_path);
 
     let solend_cfg = solend_client.get_solend_config().await;
     let solend_cfg: &'static _ = Box::leak(Box::new(solend_cfg));
@@ -1334,6 +1367,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_process_market_iter() {
-        run_liquidator_iter().await;
+        run_liquidator_iter(String::from("./private/liquidator_main.json")).await;
     }
 }
