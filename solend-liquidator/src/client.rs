@@ -23,11 +23,13 @@ use {
 
 use futures_retry::{FutureFactory, FutureRetry, RetryPolicy};
 
+use log::Log;
 use pyth_sdk_solana;
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcSendTransactionConfig};
 use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
 
+use solana_client::rpc_request::RpcError;
 use solana_program::instruction::Instruction;
 use solana_sdk::account::create_is_signer_account_infos;
 use solana_sdk::commitment_config::CommitmentLevel;
@@ -48,8 +50,9 @@ construct_uint! {
     pub struct U256(4);
 }
 
-fn handle_error<E: std::error::Error>(_e: E) -> RetryPolicy<E> {
+fn handle_error<E: std::error::Error>(e: E) -> RetryPolicy<E> {
     RetryPolicy::WaitRetry(std::time::Duration::from_millis(150))
+    // RetryPolicy::ForwardError(e)
 }
 
 pub struct Client {
@@ -432,53 +435,39 @@ impl Client {
             wallet_address,
             spl_token_mint_address,
         );
-        let leak_associated_token_address: &'static _ =
-            Box::leak(Box::new(associated_token_address.clone()));
 
-        let (account_data, _) = FutureRetry::new(
-            move || rpc_client.get_account_data(&leak_associated_token_address),
-            handle_error,
-        )
-        .await
-        .unwrap();
+        match rpc_client.get_account_data(&associated_token_address).await {
+            Err(_) => {
+                println!("account {:?} is empty. creating...", associated_token_address.to_string());
+                
+                let ix = spl_associated_token_account::instruction::create_associated_token_account(
+                    funding_address,
+                    wallet_address,
+                    spl_token_mint_address,
+                );
 
-        if account_data.is_empty() {
-            let ix = spl_associated_token_account::instruction::create_associated_token_account(
-                funding_address,
-                wallet_address,
-                spl_token_mint_address,
-            );
+                let recent_blockhash = rpc_client.get_latest_blockhash().await.unwrap();
+                let mut transaction = Transaction::new_with_payer(&[ix], Some(&signer.pubkey()));
 
-            let recent_blockhash = rpc_client.get_latest_blockhash().await.unwrap();
-            let mut transaction = Transaction::new_with_payer(&[ix], Some(&signer.pubkey()));
+                transaction.sign(&vec![signer], recent_blockhash);
 
-            transaction.sign(&vec![signer], recent_blockhash);
+                let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
 
-            let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
+                let r = rpc_client
+                    .send_and_confirm_transaction(transaction)
+                    .await
+                    .unwrap();
 
-            // let (r, _) = FutureRetry::new(
-            //     move || rpc_client.send_and_confirm_transaction(transaction),
-            //     handle_error,
-            // )
-            // .await
-            // .unwrap();
-            let r = rpc_client
-                .send_and_confirm_transaction(transaction)
-                .await
-                .unwrap();
+                println!("created account {:}! tx: {:?}", associated_token_address.to_string(), r);
 
-            println!("tx: {:?}", r);
-            rpc_client
-                .send_and_confirm_transaction(transaction)
-                .await
-                .unwrap();
+                associated_token_address
+            },
+            _ => {
+                println!("account {:?} is not empty", associated_token_address.to_string());
 
-            drop(transaction);
+                associated_token_address
+            }
         }
-
-        drop(leak_associated_token_address);
-
-        associated_token_address
     }
 
     async fn get_or_substitute_account_data(
@@ -492,53 +481,20 @@ impl Client {
             wallet_address,
             spl_token_mint_address,
         );
-        let leak_associated_token_address: &'static _ =
-            Box::leak(Box::new(associated_token_address.clone()));
 
-        let (account_data, _) = FutureRetry::new(
-            move || rpc_client.get_account_data(&leak_associated_token_address),
-            handle_error,
-        )
-        .await
-        .unwrap();
+        match rpc_client.get_account_data(&associated_token_address).await {
+            Err(_) => {
+                let ix = spl_associated_token_account::instruction::create_associated_token_account(
+                    funding_address,
+                    wallet_address,
+                    spl_token_mint_address,
+                );
 
-        // println!("account_data: {:?}", associated_token_address);
-
-        if account_data.is_empty() {
-            let ix = spl_associated_token_account::instruction::create_associated_token_account(
-                funding_address,
-                wallet_address,
-                spl_token_mint_address,
-            );
-            return (associated_token_address, Some(ix));
-
-            // let recent_blockhash = rpc_client.get_latest_blockhash().await.unwrap();
-            // let mut transaction = Transaction::new_with_payer(&[ix], Some(&signer.pubkey()));
-
-            // transaction.sign(&vec![signer], recent_blockhash);
-
-            // let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
-
-            // let (r, _) = FutureRetry::new(
-            //     move || rpc_client.send_and_confirm_transaction(transaction),
-            //     handle_error,
-            // )
-            // .await
-            // .unwrap();
-
-            // println!("tx: {:?}", r);
-            // rpc_client
-            //     .send_and_confirm_transaction(transaction)
-            //     .await
-            //     .unwrap();
-
-            // drop(transaction);
+                (associated_token_address, Some(ix))
+            },
+            _ => (associated_token_address, None)
         }
 
-        (associated_token_address, None)
-        // drop(leak_associated_token_address);
-
-        // associated_token_address
     }
 
     pub async fn liquidate_and_redeem(
@@ -724,26 +680,20 @@ impl Client {
                 // lending_market_pubkey,
             ),
         );
-
         let recent_blockhash = self.config.rpc_client.get_latest_blockhash().await.unwrap();
-
         let mut transaction = Transaction::new_with_payer(&ixs, Some(&self.config.signer.pubkey()));
-
         transaction.sign(&[self.config.signer.as_ref()], recent_blockhash);
-
         let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
 
         let r = FutureRetry::new(
             move || {
                 self.config
                     .rpc_client
-                    .send_and_confirm_transaction_with_spinner_and_config(
+                    .send_transaction_with_config(
                         transaction,
-                        CommitmentConfig {
-                            commitment: CommitmentLevel::Confirmed,
-                        },
                         RpcSendTransactionConfig {
-                            skip_preflight: false,
+                            skip_preflight: true,
+                            preflight_commitment: Some(CommitmentLevel::Confirmed),
                             ..RpcSendTransactionConfig::default()
                         },
                     )
@@ -752,17 +702,12 @@ impl Client {
         )
         .await;
 
-        panic!("1");
-        // println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
-
         match r {
             Ok((r, _)) => {
-                self.logger
-                    .info(format!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r));
+                println!(" 🚀 ✅ 🚀  brodcast: signature: {:?}", r);
             }
             Err(e) => {
-                self.logger
-                    .warn(format!(" 🚀 ❌ 🚀 broadcast: err: {:?}", e));
+                println!(" 🚀 ❌ 🚀 broadcast: err: {:?}", e);
             }
         }
 
@@ -851,11 +796,11 @@ pub fn calculate_refreshed_obligation(
             .position(|x| x.reserve_address == deposit.deposit_reserve);
 
         if token_oracle.is_none() {
-            logger.warn(format!(
+            println!(
                 " 📥  Missing token info for reserve {:}, skipping this obligation. \n
             Please restart liquidator to fetch latest configs from /v1/config",
                 deposit.deposit_reserve
-            ));
+            );
             continue;
         }
 
@@ -1185,8 +1130,7 @@ async fn process_markets(client: Arc<Client>) {
                     );
 
                     if borrowed_value <= unhealthy_borrow_value {
-                        logger.trace("do nothing if obligation is healthy");
-                        logger.info("do nothing if obligation is healthy");
+                        // println!("do nothing if obligation is healthy");
                         return;
                     }
 
@@ -1225,23 +1169,24 @@ async fn process_markets(client: Arc<Client>) {
                     };
 
                     if selected_deposit.is_none() || selected_borrow.is_none() {
-                        logger.info("skip toxic obligations caused by toxic oracle data");
+                        println!("skip toxic obligations caused by toxic oracle data");
                         return;
                     }
 
                     let selected_deposit = selected_deposit.unwrap();
                     let selected_borrow = selected_borrow.unwrap();
 
+
                     println!(
                         "obligation: {:} is underwater",
                         obligation.pubkey.to_string()
-                    );
+                    ); 
                     println!("borrowed_value: {:} ", borrowed_value.to_string());
                     println!(
                         "unhealthy_borrow_value: {:} ",
                         unhealthy_borrow_value.to_string()
                     );
-                    println!("market addr: {:} ", lending_market);
+                    format!("market addr: {:} ", lending_market);
 
                     let wallet_address = c_client.config.signer.pubkey();
                     println!(
@@ -1273,33 +1218,32 @@ async fn process_markets(client: Arc<Client>) {
                     .await
                     .unwrap();
 
-                    println!("🛢 🛢 🛢 retrieved_wallet_data: {:?}", retrieved_wallet_data);
+                    println!(
+                        " 🛢 🛢 🛢  retrieved_wallet_data: {:?}",
+                        retrieved_wallet_data
+                    );
 
-                    println!("selected_borrow: {:?}", &selected_borrow);
-                    println!("selected_deposit: {:?}", &selected_deposit);
+                    // println!("selected_borrow: {:?}", &selected_borrow);
+                    // println!("selected_deposit: {:?}", &selected_deposit);
 
                     let u_zero = U256::from(0);
                     if retrieved_wallet_data.balance == u_zero {
-                        logger.warn(format!(
+                        println!(
                             "insufficient {:} to liquidate obligation {:} in market: {:}",
                             selected_borrow.symbol,
                             obligation.pubkey.to_string(),
                             lending_market
-                        ));
+                        );
                         return;
                     } else if retrieved_wallet_data.balance < u_zero {
-                        logger.warn(format!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market));
-                        logger.warn(
-                            "potentially network error or token account does not exist in wallet",
-                        );
+                        println!("failed to get wallet balance for {:} to liquidate obligation {:} in market {:}", selected_borrow.symbol, obligation.pubkey.to_string(), lending_market);
+                        println!("potentially network error or token account does not exist in wallet");
                         return;
                     }
 
                     c_client
                         .liquidate_and_redeem(
                             &retrieved_wallet_data,
-                            // selected_borrow.symbol,
-                            // selected_deposit.symbol,
                             &selected_borrow,
                             &selected_deposit,
                             current_market.clone(),
