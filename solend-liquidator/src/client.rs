@@ -803,11 +803,11 @@ pub fn calculate_refreshed_obligation(
             .position(|x| x.reserve_address == deposit.deposit_reserve);
 
         if token_oracle.is_none() {
-            println!(
-                " 📥  Missing token info for reserve {:}, skipping this obligation. \n
-            Please restart liquidator to fetch latest configs from /v1/config",
-                deposit.deposit_reserve
-            );
+            // println!(
+            //     " 📥  Missing token info for reserve {:}, skipping this obligation. \n
+            // Please restart liquidator to fetch latest configs from /v1/config",
+            //     deposit.deposit_reserve
+            // );
             continue;
         }
 
@@ -1187,6 +1187,10 @@ async fn process_markets(client: Arc<Client>) {
                     println!(
                         "obligation: {:} is underwater",
                         obligation.pubkey.to_string()
+                    ); 
+                    println!(
+                        "obligation: {:?}",
+                        obligation.inner
                     ); 
                     println!("borrowed_value: {:} ", borrowed_value.to_string());
                     println!(
