@@ -534,7 +534,6 @@ impl Client {
         lending_market: Market,
         obligation: &Enhanced<Obligation>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let _solend_cfg = self.solend_cfg.unwrap();
         let payer_pubkey = self.config.signer.pubkey();
 
         let repay_token_symbol = &selected_borrow.symbol;
@@ -580,21 +579,22 @@ impl Client {
                 // reserve_liquidity_pyth_oracle_pubkey,
                 // reserve_liquidity_switchboard_oracle_pubkey
                 *SOLEND_PROGRAM_ID,
-                Pubkey::from_str(reserve_info.address.as_str()).unwrap(),
+                *reserve,
                 Pubkey::from_str(&reserve_info.pyth_oracle.as_str()).unwrap(),
                 Pubkey::from_str(reserve_info.switchboard_oracle.as_str()).unwrap(),
             );
             ixs.push(refresh_reserve_ix);
         }
 
-        let _refresh_obligation_ix = solend_program::instruction::refresh_obligation(
+        let refresh_obligation_ix = solend_program::instruction::refresh_obligation(
             // program_id,
             // obligation_pubkey,
             // reserve_pubkeys
             SOLEND_PROGRAM_ID.clone(),
             obligation.pubkey,
-            uniq_reserve_addresses.clone(),
+            vec![deposit_reserves, borrow_reserves].concat(),
         );
+        ixs.push(refresh_obligation_ix);
 
         let repay_token_info = Self::find_where(&lending_market.reserves, |x| {
             x.liquidity_token.symbol == *repay_token_symbol
@@ -1285,7 +1285,7 @@ async fn process_markets(client: Arc<Client>) {
 
                     if liquidation_result.is_ok() {
                         println!("liquidation of {:?} went successful, updating the obligation *in-place*...", r_obligation.pubkey.to_string());
-                        
+
                         let updated_obligation = c_client.get_obligation(Either::Right(r_obligation.pubkey)).await.unwrap();
 
                         let mut w_obligation = obligation.write();
