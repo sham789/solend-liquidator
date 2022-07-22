@@ -454,7 +454,14 @@ impl Client {
                 let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
 
                 let r = rpc_client
-                    .send_and_confirm_transaction(transaction)
+                    .send_transaction_with_config(
+                        transaction,
+                        RpcSendTransactionConfig {
+                            skip_preflight: true,
+                            preflight_commitment: Some(CommitmentLevel::Confirmed),
+                            ..RpcSendTransactionConfig::default()
+                        },
+                    )
                     .await
                     .unwrap();
 
