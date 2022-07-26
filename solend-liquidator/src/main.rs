@@ -1,8 +1,8 @@
-mod client;
-mod helpers;
-mod log;
-mod model;
-mod utils;
+pub mod client;
+pub mod helpers;
+pub mod log;
+pub mod model;
+pub mod utils;
 
 use clap::Parser;
 
