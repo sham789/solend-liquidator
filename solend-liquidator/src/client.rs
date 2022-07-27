@@ -163,14 +163,14 @@ impl Client {
         market_reserves: &Vec<model::Resef>,
     ) -> HashMap<Pubkey, OracleData> {
         let rpc = &self.config.rpc_client;
-        
+
         let result: Arc<Mutex<HashMap<Pubkey, OracleData>>> = Arc::new(Mutex::new(HashMap::new()));
         let mut handles = vec![];
-        
+
         for market_reserve in market_reserves {
             let c_rpc = Arc::clone(&rpc);
             let market_reserve = market_reserve.clone();
-            
+
             let c_result = Arc::clone(&result);
 
             let h = tokio::spawn(async move {
@@ -426,10 +426,13 @@ impl Client {
                 let (reserve_pubkey, reserve_account) = reserve_item;
                 let reserve_unpacked = Reserve::unpack(&reserve_account.data).unwrap();
 
-                w.insert(reserve_pubkey, Enhanced {
-                    inner: reserve_unpacked,
-                    pubkey: reserve_pubkey,
-                });
+                w.insert(
+                    reserve_pubkey,
+                    Enhanced {
+                        inner: reserve_unpacked,
+                        pubkey: reserve_pubkey,
+                    },
+                );
             });
 
             handles.push(h);
@@ -1048,7 +1051,6 @@ pub mod binding {
     }
 }
 
-
 pub fn decimal_to_u256(decimal: &Decimal, dest: &mut U256) {
     let mut bytes_baw = [0u8; 8 * 3];
     decimal.0.to_little_endian(&mut bytes_baw);
@@ -1120,13 +1122,11 @@ async fn process_markets(client: Arc<Client>) {
     let markets_list = client.solend_cfg.unwrap();
     let mut handles = vec![];
 
-
     for current_market in markets_list {
         let c_client = Arc::clone(&client);
         let lending_market = current_market.address.clone();
 
         let h = tokio::spawn(async move {
-
             let (oracle_data, all_obligations, reserves) = tokio::join!(
                 c_client.get_token_oracle_data(&current_market.reserves),
                 c_client.get_obligations(lending_market.as_str()),
@@ -1178,8 +1178,6 @@ async fn process_markets(client: Arc<Client>) {
                     let (borrowed_value, unhealthy_borrow_value) = (
                         refreshed_obligation.borrowed_value.clone(),
                         refreshed_obligation.unhealthy_borrow_value.clone(),
-                        // deposits.clone(),
-                        // borrows.clone(),
                     );
 
                     if borrowed_value == Decimal::from(0u64)
@@ -1204,7 +1202,6 @@ async fn process_markets(client: Arc<Client>) {
                         unhealthy_borrow_value,
                         borrowed_value,
                     );
-
 
                     // select repay token that has the highest market value
                     let selected_borrow = {
@@ -1264,7 +1261,7 @@ async fn process_markets(client: Arc<Client>) {
                         &c_client.config.signer,
                     )
                     .await;
-                    // panic!("");
+
                     let retrieved_wallet_data = get_wallet_token_data(
                         &c_client,
                         wallet_address,
