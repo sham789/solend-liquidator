@@ -2,6 +2,7 @@ pub mod client;
 pub mod helpers;
 pub mod log;
 pub mod model;
+pub mod performance;
 pub mod utils;
 
 use clap::Parser;

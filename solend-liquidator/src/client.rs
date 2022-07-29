@@ -8,6 +8,7 @@ use hyper::{Client as HyperClient, Method, Request};
 use hyper_tls::HttpsConnector;
 
 use borsh::BorshDeserialize;
+use async_trait::async_trait;
 
 use {
     solana_client::nonblocking::rpc_client::RpcClient,
@@ -45,6 +46,7 @@ use uint::construct_uint;
 
 use crate::log::Logger;
 use crate::model::{self, Market, SolendConfig};
+use crate::performance::PerformanceMeter;
 use crate::utils::body_to_string;
 
 construct_uint! {
@@ -308,6 +310,43 @@ impl Client {
         }
     }
 
+    pub async fn update_obligations(
+        c_rpc: Arc<RpcClient>,
+        obligations: Vec<Pubkey>,
+    ) -> HashMap<Pubkey, Arc<RwLock<Enhanced<Obligation>>>> {
+        let result: Arc<Mutex<HashMap<Pubkey, Arc<RwLock<Enhanced<Obligation>>>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let mut handles = vec![];
+
+        for obligation_pubkey in obligations {
+            let c_rpc = Arc::clone(&c_rpc);
+            let obligation_pubkey = obligation_pubkey.clone();
+            let result = Arc::clone(&result);
+
+            let h = tokio::spawn(async move {
+                let obl_account = c_rpc.get_account(&obligation_pubkey).await.unwrap();
+                let obligation = Obligation::unpack(&obl_account.data).unwrap();
+
+                let obl = Arc::new(RwLock::new(Enhanced {
+                    inner: obligation,
+                    pubkey: obligation_pubkey.clone(),
+                }));
+
+                let mut w = result.lock();
+                w.insert(obligation_pubkey.clone(), obl);
+            });
+
+            handles.push(h)
+        }
+
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        Arc::try_unwrap(result).unwrap().into_inner()
+    }
+
     pub async fn get_obligations(
         &self,
         market_address: &str,
@@ -444,11 +483,6 @@ impl Client {
 
         Arc::try_unwrap(result).unwrap().into_inner()
     }
-
-    // pub fn get_token_info(assets: &Vec<Asset>, symbol: &str) -> Asset {
-    //     let idx = assets.iter().position(|a| a.symbol == symbol).unwrap();
-    //     assets[idx].clone()
-    // }
 
     async fn get_or_create_account_data(
         funding_address: &Pubkey,
@@ -1118,7 +1152,57 @@ async fn get_wallet_token_data(
     }
 }
 
-async fn process_markets(client: Arc<Client>) {
+
+#[async_trait]
+trait UpdateableMarket {
+    async fn update_market_data(&mut self);
+}
+
+#[derive(Default, Clone, Debug)]
+struct MarketReservesRetriever {
+    pub oracle_data: HashMap<Pubkey, OracleData>,
+    pub obligations: HashMap<Pubkey, Arc<RwLock<Enhanced<Obligation>>>>,
+    pub reserves: HashMap<Pubkey, Enhanced<Reserve>>,
+    lending_market: String
+}
+
+#[async_trait]
+impl UpdateableMarket for MarketReservesRetriever {
+    async fn update_market_data(&mut self) {
+        // self.l
+    }
+}
+
+impl MarketReservesRetriever {
+    pub fn new(lending_market: String) -> Self {
+        Self {
+            lending_market,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Default)]
+struct MarketsCapsule {
+    pub markets: HashMap<String, Box<dyn UpdateableMarket + Send + Sync>>
+}
+
+impl MarketsCapsule {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn update_for(&mut self, market: String) {
+        match self.markets.get_mut(&market) {
+            Some(target) => {
+                target.update_market_data().await;
+            },
+            _ => {}
+        }
+    }
+}
+
+async fn process_markets(client: Arc<Client>, markets_capsule: Arc<RwLock<MarketsCapsule>>) {
     let markets_list = client.solend_cfg.unwrap();
     let mut handles = vec![];
 
@@ -1127,11 +1211,12 @@ async fn process_markets(client: Arc<Client>) {
         let lending_market = current_market.address.clone();
 
         let h = tokio::spawn(async move {
-            let (oracle_data, all_obligations, reserves) = tokio::join!(
-                c_client.get_token_oracle_data(&current_market.reserves),
-                c_client.get_obligations(lending_market.as_str()),
-                c_client.get_reserves(lending_market.as_str()),
-            );
+
+            let oracle_data = c_client
+                .get_token_oracle_data(&current_market.reserves)
+                .await;
+            let all_obligations = c_client.get_obligations(lending_market.as_str()).await;
+            let reserves = c_client.get_reserves(lending_market.as_str()).await;
 
             let current_market: &'static _ = Box::leak(Box::new(current_market));
             let reserves: &'static _ = Box::leak(Box::new(reserves));
@@ -1325,10 +1410,10 @@ pub async fn run_eternal_liquidator(keypair_path: String) {
 
     let c_solend_client = Arc::new(solend_client);
 
-    loop {
-        let c_solend_client = Arc::clone(&c_solend_client);
-        process_markets(c_solend_client).await;
-    }
+    // loop {
+    //     let c_solend_client = Arc::clone(&c_solend_client);
+    //     process_markets(c_solend_client).await;
+    // }
 }
 
 pub async fn run_liquidator_iter(keypair_path: String) {
@@ -1341,7 +1426,9 @@ pub async fn run_liquidator_iter(keypair_path: String) {
 
     let c_solend_client = Arc::new(solend_client);
 
-    process_markets(c_solend_client).await;
+    // let markets_capsule = MarketsCapsule::new();
+
+    // process_markets(c_solend_client).await;
 }
 
 #[cfg(test)]
