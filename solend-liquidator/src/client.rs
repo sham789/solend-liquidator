@@ -1124,7 +1124,7 @@ pub struct WalletBalanceData {
 }
 
 async fn get_wallet_token_data(
-    client: &Arc<Client>,
+    client: &Client,
     wallet_address: Pubkey,
     mint_address: Pubkey,
     symbol: String,
@@ -1152,24 +1152,35 @@ async fn get_wallet_token_data(
     }
 }
 
+pub async fn empty_future() -> usize { 0usize }
+
 
 #[async_trait]
 trait UpdateableMarket {
-    async fn update_market_data(&mut self);
+    async fn update_market_data(&mut self, client: &'static Client);
 }
 
 #[derive(Default, Clone, Debug)]
 struct MarketReservesRetriever {
-    pub oracle_data: HashMap<Pubkey, OracleData>,
+    pub oracle_data: Arc<RwLock<HashMap<Pubkey, OracleData>>>,
     pub obligations: HashMap<Pubkey, Arc<RwLock<Enhanced<Obligation>>>>,
-    pub reserves: HashMap<Pubkey, Enhanced<Reserve>>,
-    lending_market: String
+    pub reserves: Arc<RwLock<HashMap<Pubkey, Enhanced<Reserve>>>>,
+    lending_market: String,
+    input_reserves: Option<&'static Vec<model::Resef>>,
 }
 
 #[async_trait]
 impl UpdateableMarket for MarketReservesRetriever {
-    async fn update_market_data(&mut self) {
-        // self.l
+    async fn update_market_data(&mut self, client: &'static Client) {
+        let all_obligations = client.get_obligations(self.lending_market.as_str()).await;
+        let reserves = client.get_reserves(self.lending_market.as_str()).await;
+
+        let oracle_data = client
+            .get_token_oracle_data(self.input_reserves.unwrap())
+            .await;
+
+        self.obligations = all_obligations;
+
     }
 }
 
@@ -1182,63 +1193,81 @@ impl MarketReservesRetriever {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct MarketsCapsule {
-    pub markets: HashMap<String, Box<dyn UpdateableMarket + Send + Sync>>
+    // pub markets: HashMap<String, Box<dyn UpdateableMarket + Send + Sync>>
+    markets: HashMap<String, Box<MarketReservesRetriever>>,
+    client: Option<&'static Client>,
 }
 
+
 impl MarketsCapsule {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(
+        client: &'static Client,
+    ) -> Self {
+        Self { 
+            client: Some(client),
+            ..Default::default()
+        }
     }
 
-    pub async fn update_for(&mut self, market: String) {
-        match self.markets.get_mut(&market) {
+    pub async fn update_distinct_market(&mut self, market: &str) {
+        match self.markets.get_mut(market) {
             Some(target) => {
-                target.update_market_data().await;
+                target.update_market_data(self.client.unwrap()).await;
             },
             _ => {}
         }
     }
+
+    pub fn read_for(&self, market: &str) -> Option<&Box<MarketReservesRetriever>> {
+        self.markets.get(market)
+    }
 }
 
-async fn process_markets(client: Arc<Client>, markets_capsule: Arc<RwLock<MarketsCapsule>>) {
+
+
+async fn process_markets(client: &'static Client, markets_capsule: Arc<RwLock<MarketsCapsule>>) {
     let markets_list = client.solend_cfg.unwrap();
     let mut handles = vec![];
 
     for current_market in markets_list {
-        let c_client = Arc::clone(&client);
         let lending_market = current_market.address.clone();
+
+        let c_markets_capsule = Arc::clone(&markets_capsule);
 
         let h = tokio::spawn(async move {
 
-            let oracle_data = c_client
-                .get_token_oracle_data(&current_market.reserves)
-                .await;
-            let all_obligations = c_client.get_obligations(lending_market.as_str()).await;
-            let reserves = c_client.get_reserves(lending_market.as_str()).await;
+            let r_markets_capsule = c_markets_capsule.read();
+            let markets = r_markets_capsule.read_for(lending_market.as_str()).unwrap();
 
-            let current_market: &'static _ = Box::leak(Box::new(current_market));
-            let reserves: &'static _ = Box::leak(Box::new(reserves));
-            let oracle_data: &'static _ = Box::leak(Box::new(oracle_data));
+            let (oracle_data, all_obligations, reserves) = (
+                &markets.oracle_data,
+                &markets.obligations,
+                &markets.reserves
+            );
 
             let mut inner_handles = vec![];
 
-            for (_, raw_obligation) in &all_obligations {
-                let c_client = Arc::clone(&c_client);
-                let obligation = Arc::clone(&raw_obligation);
+            for (i, raw_obligation) in all_obligations {
+                // let c_client = Arc::clone(&c_client);
+
+                let obligation = Arc::clone(raw_obligation);
+                let oracle_data = Arc::clone(&oracle_data);
+                let reserves = Arc::clone(&reserves);
+                let lending_market = lending_market.clone();
 
                 let h = tokio::spawn(async move {
                     let r_obligation = obligation.read().clone();
 
-                    let slot = c_client.config.rpc_client.get_slot().await.unwrap();
-                    let block_time = c_client
+                    let slot = client.config.rpc_client.get_slot().await.unwrap();
+                    let block_time = client
                         .config
                         .rpc_client
                         .get_block_time(slot)
                         .await
                         .unwrap();
-                    let epoch_info = c_client.config.rpc_client.get_epoch_info().await.unwrap();
+                    let epoch_info = client.config.rpc_client.get_epoch_info().await.unwrap();
 
                     let clock = solana_sdk::clock::Clock {
                         // pub slot: u64,
@@ -1251,14 +1280,17 @@ async fn process_markets(client: Arc<Client>, markets_capsule: Arc<RwLock<Market
                         epoch: epoch_info.epoch,
                         ..solana_sdk::clock::Clock::default()
                     };
+
+                    let r_reserves = reserves.read();
+                    let r_oracle_data = oracle_data.read();
                     let r =
-                        binding::refresh_obligation(&r_obligation, &reserves, &oracle_data, &clock);
+                        binding::refresh_obligation(&r_obligation, &*r_reserves, &*r_oracle_data, &clock);
 
                     if r.is_err() {
-                        return;
+                        return None;
                     }
 
-                    let (refreshed_obligation, deposits, borrows) = r.unwrap();
+                    let (refreshed_obligation, deposits, borrows) = r.as_ref().unwrap();
 
                     let (borrowed_value, unhealthy_borrow_value) = (
                         refreshed_obligation.borrowed_value.clone(),
@@ -1270,7 +1302,7 @@ async fn process_markets(client: Arc<Client>, markets_capsule: Arc<RwLock<Market
                         || borrowed_value <= unhealthy_borrow_value
                     {
                         // println!("do nothing if obligation is healthy");
-                        return;
+                        return None;
                     }
 
                     println!(
@@ -1290,7 +1322,7 @@ async fn process_markets(client: Arc<Client>, markets_capsule: Arc<RwLock<Market
 
                     // select repay token that has the highest market value
                     let selected_borrow = {
-                        let mut v: Option<Borrow> = None;
+                        let mut v: Option<&Borrow> = None;
                         for borrow in borrows {
                             // if v.is_none() || deposit.market_value >= v.unwrap().market_value
                             match v {
@@ -1307,7 +1339,7 @@ async fn process_markets(client: Arc<Client>, markets_capsule: Arc<RwLock<Market
 
                     // select the withdrawal collateral token with the highest market value
                     let selected_deposit = {
-                        let mut v: Option<Deposit> = None;
+                        let mut v: Option<&Deposit> = None;
                         for deposit in deposits {
                             // if v.is_none() || deposit.market_value >= v.unwrap().market_value
                             match v {
@@ -1324,7 +1356,7 @@ async fn process_markets(client: Arc<Client>, markets_capsule: Arc<RwLock<Market
 
                     if selected_deposit.is_none() || selected_borrow.is_none() {
                         // println!("skip toxic obligations caused by toxic oracle data");
-                        return;
+                        return None;
                     }
 
                     let selected_deposit = selected_deposit.unwrap();
@@ -1336,59 +1368,71 @@ async fn process_markets(client: Arc<Client>, markets_capsule: Arc<RwLock<Market
                     );
                     println!("obligation: {:?}", r_obligation.inner);
 
-                    let wallet_address = c_client.config.signer.pubkey();
-
-                    Client::get_or_create_account_data(
-                        &c_client.config.signer.pubkey(),
-                        &c_client.config.signer.pubkey(),
-                        &selected_borrow.mint_address,
-                        &c_client.config.rpc_client,
-                        &c_client.config.signer,
+                    Some(
+                        (selected_deposit.clone(), selected_borrow.clone(), r_obligation, i, lending_market)
                     )
-                    .await;
 
-                    let retrieved_wallet_data = get_wallet_token_data(
-                        &c_client,
-                        wallet_address,
-                        selected_borrow.mint_address,
-                        selected_borrow.symbol.clone(),
-                    )
-                    .await
-                    .unwrap();
-
-                    let u_zero = U256::from(0);
-                    if retrieved_wallet_data.balance == u_zero {
-                        return;
-                    } else if retrieved_wallet_data.balance < u_zero {
-                        return;
-                    }
-
-                    let liquidation_result = c_client
-                        .liquidate_and_redeem(
-                            retrieved_wallet_data.balance.as_u64(),
-                            &selected_borrow,
-                            &selected_deposit,
-                            current_market,
-                            &r_obligation,
-                        )
-                        .await;
-
-                    if liquidation_result.is_ok() {
-                        let updated_obligation = c_client
-                            .get_obligation(Either::Right(r_obligation.pubkey))
-                            .await
-                            .unwrap();
-
-                        let mut w_obligation = obligation.write();
-                        *w_obligation = updated_obligation;
-                    }
                 });
 
                 inner_handles.push(h);
             }
 
             for inner_h in inner_handles {
-                inner_h.await.unwrap();
+                let r = inner_h.await.unwrap();
+                if r.is_none() {
+                    continue;
+                }
+
+                let values = r.unwrap();
+                let (selected_deposit, selected_borrow, r_obligation, i, lending_market) = values;
+
+                Client::get_or_create_account_data(
+                    &client.config.signer.pubkey(),
+                    &client.config.signer.pubkey(),
+                    &selected_borrow.mint_address,
+                    &client.config.rpc_client,
+                    &client.config.signer,
+                ).await;
+
+                let retrieved_wallet_data = get_wallet_token_data(
+                    &client,
+                    client.config.signer.pubkey(),
+                    selected_borrow.mint_address,
+                    selected_borrow.symbol.clone(),
+                )
+                .await
+                .unwrap();
+
+                let u_zero = U256::from(0);
+                if retrieved_wallet_data.balance == u_zero {
+                    continue;
+                } else if retrieved_wallet_data.balance < u_zero {
+                    continue;
+                }
+
+                let liquidation_result = client
+                    .liquidate_and_redeem(
+                        retrieved_wallet_data.balance.as_u64(),
+                        &selected_borrow,
+                        &selected_deposit,
+                        current_market,
+                        &r_obligation,
+                    )
+                    .await;
+
+                if liquidation_result.is_ok() {
+                    // let markets = c_markets_capsule.read().read_for(lending_market.as_str()).unwrap();
+
+                    // let updated_obligation = client
+                    //     .get_obligation(Either::Right(r_obligation.pubkey))
+                    //     .await
+                    //     .unwrap();
+
+                    // let obligation = markets.obligations.get(&r_obligation.pubkey).unwrap();
+
+                    // let mut w_obligation = obligation.write();
+                    // *w_obligation = updated_obligation;
+                }
             }
         });
 
@@ -1408,11 +1452,11 @@ pub async fn run_eternal_liquidator(keypair_path: String) {
 
     solend_client.solend_cfg = Some(solend_cfg);
 
-    let c_solend_client = Arc::new(solend_client);
+    let solend_client: &'static _ = Box::leak(Box::new(solend_client));
+    let markets_capsule: &'static _ = Box::leak(Box::new(MarketsCapsule::new(solend_client)));
 
     // loop {
-    //     let c_solend_client = Arc::clone(&c_solend_client);
-    //     process_markets(c_solend_client).await;
+    //     process_markets(solend_client, markets_capsule).await;
     // }
 }
 
@@ -1424,11 +1468,10 @@ pub async fn run_liquidator_iter(keypair_path: String) {
 
     solend_client.solend_cfg = Some(solend_cfg);
 
-    let c_solend_client = Arc::new(solend_client);
+    let solend_client: &'static _ = Box::leak(Box::new(solend_client));
+    let markets_capsule: &'static _ = Box::leak(Box::new(MarketsCapsule::new(solend_client)));
 
-    // let markets_capsule = MarketsCapsule::new();
-
-    // process_markets(c_solend_client).await;
+    // process_markets(solend_client, markets_capsule).await;
 }
 
 #[cfg(test)]
