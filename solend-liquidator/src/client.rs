@@ -44,19 +44,15 @@ use spl_associated_token_account::get_associated_token_address;
 use switchboard_program::AggregatorState;
 use uint::construct_uint;
 
+use crate::binding;
 use crate::log::Logger;
 use crate::model::{self, Market, SolendConfig};
 use crate::performance::PerformanceMeter;
 use crate::utils::body_to_string;
 
-construct_uint! {
-    pub struct U256(4);
-}
-
-fn handle_error<E: std::error::Error>(e: E) -> RetryPolicy<E> {
-    RetryPolicy::WaitRetry(std::time::Duration::from_millis(150))
-    // RetryPolicy::ForwardError(e)
-}
+use crate::client_model::*;
+use crate::constants::*;
+use crate::helpers::*;
 
 pub struct Client {
     client: HyperClient<HttpsConnector<hyper::client::HttpConnector>>,
@@ -68,11 +64,6 @@ pub struct Client {
 pub struct Config {
     rpc_client: Arc<Box<RpcClient>>,
     signer: Box<Keypair>,
-}
-
-struct FormedOracle {
-    pub price_address: Pubkey,
-    pub switchboard_feed_address: Pubkey,
 }
 
 pub fn get_config(keypair_path: String) -> Config {
@@ -94,34 +85,20 @@ pub fn get_config(keypair_path: String) -> Config {
     }
 }
 
-#[derive(Debug, Clone, serde_derive::Serialize, serde_derive::Deserialize)]
-pub struct OracleData {
-    pub symbol: String,
-    pub reserve_address: Pubkey,
-    pub mint_address: Pubkey,
-    pub decimals: i64,
-    pub price: u64, // pub price: pyth_sdk_solana::state::PriceFeed,
-}
-
-#[derive(Debug, Clone)]
-pub struct Enhanced<T: Clone> {
-    pub inner: T,
-    pub pubkey: Pubkey,
-}
-
-lazy_static::lazy_static! {
-    static ref SWITCHBOARD_V1_ADDRESS: Pubkey =
-        Pubkey::from_str("DtmE9D2CSB4L5D6A15mraeEjrGMm6auWVzgaD8hK2tZM").unwrap();
-    static ref SWITCHBOARD_V2_ADDRESS: Pubkey =
-        Pubkey::from_str("SW1TCH7qEPTdLsDHRgPuMQjbQxKdH2aBStViMFnt64f").unwrap();
-    static ref NULL_ORACLE: Pubkey =
-        Pubkey::from_str("nu11111111111111111111111111111111111111111").unwrap();
-    static ref SOLEND_PROGRAM_ID: Pubkey =
-        Pubkey::from_str("So1endDq2YkqhipRh3WViPa8hdiSpxWy6z3Z6tMCpAo").unwrap();
-}
-
 impl Client {
     const CFG_PRESET: &'static str = "production";
+
+    pub fn signer(&self) -> &Box<Keypair> {
+        &self.config.signer
+    }
+
+    pub fn rpc_client(&self) -> &Arc<Box<RpcClient>> {
+        &self.config.rpc_client
+    }
+
+    pub fn solend_config(&self) -> Option<&'static SolendConfig> {
+        self.solend_cfg
+    }
 
     pub fn new(keypair_path: String) -> Self {
         let client = HyperClient::builder().build::<_, Body>(HttpsConnector::new());
@@ -481,7 +458,7 @@ impl Client {
         Arc::try_unwrap(result).unwrap().into_inner()
     }
 
-    async fn get_or_create_account_data(
+    pub async fn get_or_create_account_data(
         funding_address: &Pubkey,
         wallet_address: &Pubkey,
         spl_token_mint_address: &Pubkey,
@@ -762,326 +739,6 @@ impl Client {
     }
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum LiquidationAndRedeemError {
-    #[error("reserves are not identified")]
-    ReservesAreNotIdentified,
-}
-
-// type Borrow = {
-//   borrowReserve: PublicKey;
-//   borrowAmountWads: BN;
-//   marketValue: BigNumber;
-//   mintAddress: string,
-//   symbol: string;
-// };
-#[derive(Debug, Clone)]
-pub struct Borrow {
-    pub borrow_reserve: Pubkey,
-    pub borrow_amount_wads: Decimal,
-    pub market_value: Decimal,
-    pub mint_address: Pubkey,
-    pub symbol: String,
-}
-
-// type Deposit = {
-//   depositReserve: PublicKey,
-//   depositAmount: BN,
-//   marketValue: BigNumber,
-//   symbol: string;
-// };
-
-#[derive(Debug, Clone)]
-pub struct Deposit {
-    pub deposit_reserve: Pubkey,
-    // pub deposit_amount: Decimal,
-    pub deposit_amount: u64,
-    pub market_value: Decimal,
-    pub symbol: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct RefreshedObligation {
-    pub deposited_value: U256,
-    pub borrowed_value: U256,
-    pub allowed_borrow_value: U256,
-    pub unhealthy_borrow_value: U256,
-    pub deposits: Vec<Deposit>,
-    pub borrows: Vec<Borrow>,
-    pub utilization_ratio: U256,
-}
-
-pub fn wad() -> U256 {
-    U256::from(1000000000000000000u128)
-}
-
-pub mod fixtures {
-    use std::path::Path;
-
-    use super::*;
-
-    #[derive(
-        Default, PartialEq, Clone, Debug, serde_derive::Serialize, serde_derive::Deserialize,
-    )]
-    pub struct CalculateRefreshedObligationFixture {
-        pub packed_obligation: Vec<u8>,
-        pub packed_all_reserves: Vec<(Pubkey, Vec<u8>)>,
-        pub packed_oracles: Vec<Vec<u8>>,
-        // pub obligation: Obligation,
-        // pub all_reserves: Vec<Enhanced<Reserve>>,
-        // pub tokens_oracle: Vec<OracleData>,
-    }
-
-    impl CalculateRefreshedObligationFixture {
-        pub async fn persist(&self, path: String) {
-            let content = serde_json::to_string_pretty(&self).unwrap();
-            tokio::fs::write(Path::new(&path), content).await.unwrap();
-        }
-
-        pub fn encode(
-            obligation: Obligation,
-            all_reserves: &Vec<Enhanced<Reserve>>,
-            oracles: &Vec<OracleData>,
-        ) -> Self {
-            let mut packed_obligation = [0u8; 1300];
-            Obligation::pack(obligation.clone(), &mut packed_obligation).unwrap();
-
-            let mut packed_all_reserves = vec![];
-            for reserve in all_reserves {
-                let mut packed_reserve = [0u8; 619];
-
-                Reserve::pack(reserve.inner.clone(), &mut packed_reserve).unwrap();
-
-                // let concated = vec![reserve_pubkey, packed_reserve.to_vec()].concat();
-                packed_all_reserves.push((reserve.pubkey, packed_reserve.to_vec()));
-            }
-
-            let mut packed_oracles = vec![];
-            for oracle in oracles {
-                let packed_oracle = serde_json::to_vec(oracle).unwrap();
-                packed_oracles.push(packed_oracle)
-            }
-
-            Self {
-                packed_obligation: packed_obligation.to_vec(),
-                packed_all_reserves,
-                packed_oracles,
-                ..CalculateRefreshedObligationFixture::default()
-            }
-        }
-
-        pub fn decode(&self) -> (Obligation, Vec<Enhanced<Reserve>>, Vec<OracleData>) {
-            let obligation = Obligation::unpack(&self.packed_obligation).unwrap();
-
-            let mut all_reserves = vec![];
-            for reserve in self.packed_all_reserves.clone() {
-                let inner = Reserve::unpack(&reserve.1).unwrap();
-                all_reserves.push(Enhanced {
-                    inner,
-                    pubkey: reserve.0,
-                });
-            }
-
-            let mut oracles = vec![];
-            for oracle in self.packed_oracles.clone() {
-                let value: OracleData = serde_json::from_slice(oracle.as_slice()).unwrap();
-                oracles.push(value);
-            }
-
-            (obligation, all_reserves, oracles)
-        }
-    }
-}
-
-pub mod binding {
-    use super::*;
-
-    use std::{
-        cmp::{max, min},
-        time::SystemTime,
-    };
-
-    use solana_sdk::clock::Clock;
-    use solend_program::{
-        error::LendingError,
-        math::{TryAdd, TryDiv, TryMul, TrySub},
-    };
-
-    // process_refresh_obligation
-
-    pub fn refresh_obligation(
-        // program_id: &Pubkey,
-        enhanced_obligation: &Enhanced<Obligation>,
-        all_reserves: &HashMap<Pubkey, Enhanced<Reserve>>,
-        tokens_oracle: &HashMap<Pubkey, OracleData>,
-        clock: &Clock,
-    ) -> Result<(Obligation, Vec<Deposit>, Vec<Borrow>), Box<dyn std::error::Error + Send + Sync>>
-    {
-        let mut obligation = enhanced_obligation.inner.clone();
-
-        let mut deposited_value = Decimal::zero();
-        let mut borrowed_value = Decimal::zero();
-        let mut allowed_borrow_value = Decimal::zero();
-        let mut unhealthy_borrow_value = Decimal::zero();
-
-        let mut deposits = vec![];
-        let mut borrows = vec![];
-
-        for (_index, collateral) in obligation.deposits.iter_mut().enumerate() {
-            let deposit_reserve = all_reserves.get(&collateral.deposit_reserve);
-
-            if deposit_reserve.is_none() {
-                // println!("DEPOSIT: oracle price not discovered for: {:?}", collateral);
-                return Err(LendingError::InvalidAccountInput.into());
-            }
-
-            let deposit_reserve = deposit_reserve.unwrap();
-            // let deposit_reserve = &all_reserves[deposit_reserve];
-
-            // let token_oracle_idx = tokens_oracle
-            //     .iter()
-            //     .position(|x| x.reserve_address == collateral.deposit_reserve);
-            let token_oracle = tokens_oracle.get(&collateral.deposit_reserve);
-
-            if token_oracle.is_none() {
-                // println!("collateral.deposit_reserve: {:?}", collateral.deposit_reserve);
-                // println!("oracles.reserves: {:?}", tokens_oracle.iter().map(|x| x.reserve_address).collect::<Vec<Pubkey>>());
-                return Err(LendingError::InvalidAccountInput.into());
-            }
-            // let token_oracle_idx = token_oracle_idx.unwrap();
-            // let token_oracle = &tokens_oracle[token_oracle_idx];
-            let token_oracle = token_oracle.unwrap();
-
-            // @TODO: add lookup table https://git.io/JOCYq
-            let decimals = 10u64
-                .checked_pow(deposit_reserve.inner.liquidity.mint_decimals as u32)
-                .ok_or(LendingError::MathOverflow)?;
-
-            let market_value = deposit_reserve
-                .inner
-                .collateral_exchange_rate()?
-                .decimal_collateral_to_liquidity(collateral.deposited_amount.into())?
-                .try_mul(deposit_reserve.inner.liquidity.market_price)?
-                .try_div(decimals)?;
-            collateral.market_value = market_value;
-
-            let loan_to_value_rate =
-                Rate::from_percent(deposit_reserve.inner.config.loan_to_value_ratio);
-            let liquidation_threshold_rate =
-                Rate::from_percent(deposit_reserve.inner.config.liquidation_threshold);
-
-            deposited_value = deposited_value.try_add(market_value)?;
-            allowed_borrow_value =
-                allowed_borrow_value.try_add(market_value.try_mul(loan_to_value_rate)?)?;
-            unhealthy_borrow_value = unhealthy_borrow_value
-                .try_add(market_value.try_mul(liquidation_threshold_rate)?)?;
-
-            let casted_depo = Deposit {
-                deposit_reserve: collateral.deposit_reserve,
-                deposit_amount: collateral.deposited_amount,
-                market_value,
-                symbol: token_oracle.symbol.clone(),
-            };
-            // println!(" 📥  casted_depo: {:?}", casted_depo);
-            deposits.push(casted_depo);
-        }
-
-        for (_index, liquidity) in obligation.borrows.iter_mut().enumerate() {
-            let reserve = all_reserves.get(&liquidity.borrow_reserve);
-
-            // let token_oracle = tokens_oracle
-            //     .iter()
-            //     .position(|x| x.reserve_address == liquidity.borrow_reserve);
-            let token_oracle = tokens_oracle.get(&liquidity.borrow_reserve);
-
-            if token_oracle.is_none() {
-                // println!("BORROW: oracle price not discovered for: {:?}", liquidity);
-                return Err(LendingError::InvalidAccountInput.into());
-            }
-
-            let token_oracle = token_oracle.unwrap();
-            // let token_oracle = &tokens_oracle[token_oracle];
-
-            if reserve.is_none() {
-                return Err(LendingError::InvalidAccountInput.into());
-            }
-            let reserve = reserve.unwrap();
-            // let reserve = all_reserves
-            //     .iter()
-            //     .position(|r| r.pubkey == liquidity.borrow_reserve)
-            //     .unwrap();
-            // let reserve = &all_reserves[reserve];
-            let borrow_reserve = &reserve.inner;
-
-            liquidity.accrue_interest(borrow_reserve.liquidity.cumulative_borrow_rate_wads)?;
-
-            // @TODO: add lookup table https://git.io/JOCYq
-            let decimals = 10u64
-                .checked_pow(borrow_reserve.liquidity.mint_decimals as u32)
-                .ok_or(LendingError::MathOverflow)?;
-
-            let market_value = liquidity
-                .borrowed_amount_wads
-                .try_mul(borrow_reserve.liquidity.market_price)?
-                .try_div(decimals)?;
-            liquidity.market_value = market_value;
-
-            borrowed_value = borrowed_value.try_add(market_value)?;
-
-            let casted_borrow = Borrow {
-                borrow_reserve: liquidity.borrow_reserve,
-                borrow_amount_wads: liquidity.borrowed_amount_wads,
-                mint_address: token_oracle.mint_address,
-                market_value,
-                symbol: token_oracle.symbol.clone(),
-            };
-
-            borrows.push(casted_borrow);
-        }
-
-        obligation.deposited_value = deposited_value;
-        obligation.borrowed_value = borrowed_value;
-
-        // Wednesday, June 22, 2022 12:00:00 PM GMT
-        let start_timestamp = 1655899200u64;
-        // Wednesday, June 28, 2022 8:00:00 AM GMT
-        let end_timestamp = 1656403200u64;
-        let current_timestamp = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        // let current_timestamp = clock.unix_timestamp as u64;
-        let current_timestamp_in_range =
-            min(max(start_timestamp, current_timestamp), end_timestamp);
-        let numerator = end_timestamp
-            .checked_sub(current_timestamp_in_range)
-            .ok_or(LendingError::MathOverflow)?;
-        let denominator = end_timestamp
-            .checked_sub(start_timestamp)
-            .ok_or(LendingError::MathOverflow)?;
-
-        let start_global_unhealthy_borrow_value = Decimal::from(120000000u64);
-        let end_global_unhealthy_borrow_value = Decimal::from(50000000u64);
-
-        let global_unhealthy_borrow_value = end_global_unhealthy_borrow_value.try_add(
-            start_global_unhealthy_borrow_value
-                .try_sub(end_global_unhealthy_borrow_value)?
-                .try_mul(numerator)?
-                .try_div(denominator)?,
-        )?;
-        let global_allowed_borrow_value =
-            global_unhealthy_borrow_value.try_sub(Decimal::from(5000000u64))?;
-
-        obligation.allowed_borrow_value = min(allowed_borrow_value, global_allowed_borrow_value);
-        obligation.unhealthy_borrow_value =
-            min(unhealthy_borrow_value, global_unhealthy_borrow_value);
-
-        obligation.last_update.update_slot(clock.slot);
-
-        Ok((obligation, deposits, borrows))
-    }
-}
-
 pub fn decimal_to_u256(decimal: &Decimal, dest: &mut U256) {
     let mut bytes_baw = [0u8; 8 * 3];
     decimal.0.to_little_endian(&mut bytes_baw);
@@ -1120,7 +777,7 @@ pub struct WalletBalanceData {
     pub symbol: String,
 }
 
-async fn get_wallet_token_data(
+pub async fn get_wallet_token_data(
     client: &Client,
     wallet_address: Pubkey,
     mint_address: Pubkey,
@@ -1160,7 +817,7 @@ trait UpdateableMarket {
 }
 
 #[derive(Default, Clone, Debug)]
-struct MarketReservesRetriever {
+pub struct MarketReservesRetriever {
     pub oracle_data: Arc<RwLock<HashMap<Pubkey, OracleData>>>,
     pub obligations: HashMap<Pubkey, Arc<RwLock<Enhanced<Obligation>>>>,
     pub reserves: Arc<RwLock<HashMap<Pubkey, Enhanced<Reserve>>>>,
@@ -1214,7 +871,7 @@ impl MarketReservesRetriever {
 }
 
 #[derive(Default, Clone)]
-struct MarketsCapsule {
+pub struct MarketsCapsule {
     // pub markets: HashMap<String, Box<dyn UpdateableMarket + Send + Sync>>
     markets: HashMap<String, Box<MarketReservesRetriever>>,
     client: Option<&'static Client>,
@@ -1262,256 +919,6 @@ impl MarketsCapsule {
     pub fn read_for(self, market: String) -> Box<MarketReservesRetriever> {
         self.markets.get(&market).unwrap().clone()
     }
-}
-
-async fn process_markets(client: &'static Client, markets_capsule: Arc<RwLock<MarketsCapsule>>) {
-    let markets_list = client.solend_cfg.unwrap();
-    let mut handles = vec![];
-
-    let mut meter = PerformanceMeter::new();
-    meter.add_point("before capsule initialization");
-
-    for current_market in markets_list {
-        markets_capsule
-            .write()
-            .update_initially(
-                current_market.address.clone(),
-                Box::leak(Box::new(current_market.reserves.clone())),
-            )
-            .await;
-    }
-
-    meter.add_point("after capsule initialization / before markets update");
-
-    for current_market in markets_list {
-        let lending_market = current_market.address.clone();
-
-        // let c_markets_capsule = Arc::clone(&markets_capsule);
-
-        markets_capsule
-            .write()
-            .update_distinct_market(current_market.address.clone())
-            .await;
-
-        let r_markets_capsule = markets_capsule.read().clone();
-        let markets = r_markets_capsule.read_for(lending_market.clone());
-
-        let h = tokio::spawn(async move {
-            let (oracle_data, all_obligations, reserves) =
-                (markets.oracle_data, markets.obligations, markets.reserves);
-
-            let mut inner_handles = vec![];
-
-            for (i, raw_obligation) in all_obligations {
-                let obligation = Arc::clone(&raw_obligation);
-                let oracle_data = Arc::clone(&oracle_data);
-                let reserves = Arc::clone(&reserves);
-                let lending_market = lending_market.clone();
-
-                let h = tokio::spawn(async move {
-
-                    let mut meter = PerformanceMeter::new();
-                    meter.add_point("before obl read");
-
-                    let r_obligation = obligation.read().clone();
-
-                    meter.add_point("before get slot");
-                    let slot = client.config.rpc_client.get_slot().await.unwrap();
-                    meter.add_point("before get block time");
-                    let block_time = client.config.rpc_client.get_block_time(slot).await.unwrap();
-                    meter.add_point("before get epoch info");
-                    let epoch_info = client.config.rpc_client.get_epoch_info().await.unwrap();
-
-                    let clock = solana_sdk::clock::Clock {
-                        // pub slot: u64,
-                        // pub epoch_start_timestamp: i64,
-                        // pub epoch: u64,
-                        // pub leader_schedule_epoch: u64,
-                        // pub unix_timestamp: i64,
-                        slot,
-                        unix_timestamp: block_time,
-                        epoch: epoch_info.epoch,
-                        ..solana_sdk::clock::Clock::default()
-                    };
-
-                    let r_reserves = reserves.read();
-                    let r_oracle_data = oracle_data.read();
-
-                    meter.add_point("before refresh obligation");
-
-                    let r = binding::refresh_obligation(
-                        &r_obligation,
-                        &*r_reserves,
-                        &*r_oracle_data,
-                        &clock,
-                    );
-
-                    if r.is_err() {
-                        return None;
-                    }
-
-                    let (refreshed_obligation, deposits, borrows) = r.unwrap();
-
-                    let (borrowed_value, unhealthy_borrow_value) = (
-                        refreshed_obligation.borrowed_value.clone(),
-                        refreshed_obligation.unhealthy_borrow_value.clone(),
-                    );
-
-                    if borrowed_value == Decimal::from(0u64)
-                        || unhealthy_borrow_value == Decimal::from(0u64)
-                        || borrowed_value <= unhealthy_borrow_value
-                    {
-                        // println!("do nothing if obligation is healthy");
-                        return None;
-                    }
-
-                    println!(
-                        "
-                        obligation: {:?}
-                        refreshed_obligation_pubkey: {:?}
-                        refreshed_obligation: {:?}
-                        unhealthy_borrow_value: {:?}
-                        borrowed_value: {:?}
-                    ",
-                        r_obligation,
-                        r_obligation.pubkey.to_string(),
-                        refreshed_obligation,
-                        unhealthy_borrow_value,
-                        borrowed_value,
-                    );
-
-                    // select repay token that has the highest market value
-                    let selected_borrow = {
-                        let mut v: Option<Borrow> = None;
-                        for borrow in borrows {
-                            // if v.is_none() || deposit.market_value >= v.unwrap().market_value
-                            match v {
-                                Some(ref real_v) => {
-                                    if borrow.market_value >= real_v.market_value {
-                                        v = Some(borrow);
-                                    }
-                                }
-                                None => v = Some(borrow),
-                            }
-                        }
-                        v
-                    };
-
-                    // select the withdrawal collateral token with the highest market value
-                    let selected_deposit = {
-                        let mut v: Option<Deposit> = None;
-                        for deposit in deposits {
-                            // if v.is_none() || deposit.market_value >= v.unwrap().market_value
-                            match v {
-                                Some(ref real_v) => {
-                                    if deposit.market_value >= real_v.market_value {
-                                        v = Some(deposit);
-                                    }
-                                }
-                                None => v = Some(deposit),
-                            }
-                        }
-                        v
-                    };
-
-                    if selected_deposit.is_none() || selected_borrow.is_none() {
-                        // println!("skip toxic obligations caused by toxic oracle data");
-                        return None;
-                    }
-
-                    let selected_deposit = selected_deposit.unwrap();
-                    let selected_borrow = selected_borrow.unwrap();
-
-                    println!(
-                        "obligation: {:} is underwater",
-                        r_obligation.pubkey.to_string()
-                    );
-                    println!("obligation: {:?}", r_obligation.inner);
-                    meter.measure();
-
-                    Some((
-                        selected_deposit.clone(),
-                        selected_borrow.clone(),
-                        r_obligation,
-                        i,
-                        lending_market,
-                    ))
-                });
-
-                inner_handles.push(h);
-            }
-
-            let mut update_required_obligations = vec![];
-            for inner_h in inner_handles {
-                let r = inner_h.await.unwrap();
-                if r.is_none() {
-                    continue;
-                }
-
-                let values = r.unwrap();
-                let (selected_deposit, selected_borrow, r_obligation, i, lending_market) = values;
-
-                Client::get_or_create_account_data(
-                    &client.config.signer.pubkey(),
-                    &client.config.signer.pubkey(),
-                    &selected_borrow.mint_address,
-                    &client.config.rpc_client,
-                    &client.config.signer,
-                )
-                .await;
-
-                let retrieved_wallet_data = get_wallet_token_data(
-                    &client,
-                    client.config.signer.pubkey(),
-                    selected_borrow.mint_address,
-                    selected_borrow.symbol.clone(),
-                )
-                .await
-                .unwrap();
-
-                let u_zero = U256::from(0);
-                if retrieved_wallet_data.balance == u_zero {
-                    continue;
-                } else if retrieved_wallet_data.balance < u_zero {
-                    continue;
-                }
-
-                let liquidation_result = client
-                    .liquidate_and_redeem(
-                        retrieved_wallet_data.balance.as_u64(),
-                        &selected_borrow,
-                        &selected_deposit,
-                        current_market,
-                        &r_obligation,
-                    )
-                    .await;
-
-                if liquidation_result.is_ok() {
-                    update_required_obligations.push((lending_market, r_obligation.pubkey));
-                }
-            }
-
-            return update_required_obligations;
-        });
-
-        handles.push(h);
-    }
-
-    meter.add_point("before main calc");
-
-    for h in handles {
-        let updated_to_obligations = h.await.unwrap();
-
-        for (lending_market, obligation_pubkey) in updated_to_obligations {
-            let c_markets_capsule = Arc::clone(&markets_capsule);
-            c_markets_capsule
-                .write()
-                .update_distinct_obligation(lending_market, obligation_pubkey)
-                .await;
-        }
-    }
-
-    meter.measure();
 }
 
 pub async fn run_eternal_liquidator(keypair_path: String) {

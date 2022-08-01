@@ -1,4 +1,7 @@
+pub mod binding;
 pub mod client;
+pub mod client_model;
+pub mod constants;
 pub mod helpers;
 pub mod log;
 pub mod model;
