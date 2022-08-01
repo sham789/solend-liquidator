@@ -10,6 +10,8 @@ pub mod utils;
 
 use clap::Parser;
 
+use crate::client::{run_eternal_liquidator, run_liquidator_iter};
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 struct Args {
@@ -19,7 +21,6 @@ struct Args {
     keypair_path: String,
 }
 
-use crate::client::{run_eternal_liquidator, run_liquidator_iter};
 
 #[tokio::main]
 async fn main() {

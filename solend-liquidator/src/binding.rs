@@ -1,53 +1,15 @@
-use std::collections::{HashMap, HashSet};
-use std::ops::{Add, Div, Mul};
-use std::sync::Arc;
-
-use hyper::Body;
-
-use hyper::{Client as HyperClient, Method, Request};
-use hyper_tls::HttpsConnector;
-
-use async_trait::async_trait;
-use borsh::BorshDeserialize;
-
-use {
-    solana_client::nonblocking::rpc_client::RpcClient,
-    solana_client::rpc_config::RpcAccountInfoConfig,
-    solana_program::{program_pack::Pack, pubkey::Pubkey},
-    solana_sdk::{
-        commitment_config::CommitmentConfig,
-        signature::{Keypair, Signer},
-        transaction::Transaction,
-    },
-    std::str::FromStr,
-};
-
-use either::Either;
-use futures_retry::{FutureFactory, FutureRetry, RetryPolicy};
-use parking_lot::{Mutex, RwLock};
-
-use log::Log;
-use pyth_sdk_solana;
-use solana_account_decoder::UiAccountEncoding;
-use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcSendTransactionConfig};
-use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
-
-use solana_program::instruction::Instruction;
-use solana_sdk::account::create_is_signer_account_infos;
-use solana_sdk::commitment_config::CommitmentLevel;
-
-use solend_program::math::{Decimal, Rate};
-use solend_program::state::{Obligation, ObligationCollateral, ObligationLiquidity, Reserve};
-
-use spl_associated_token_account::get_associated_token_address;
-
-use switchboard_program::AggregatorState;
-// use uint::construct_uint;
-
+use std::collections::HashMap;
 use std::{
     cmp::{max, min},
     time::SystemTime,
 };
+
+use solana_program::pubkey::Pubkey;
+
+use futures_retry::FutureFactory;
+
+use solend_program::math::{Decimal, Rate};
+use solend_program::state::{Obligation, Reserve};
 
 use solana_sdk::clock::Clock;
 use solend_program::{
@@ -57,10 +19,7 @@ use solend_program::{
 
 use crate::client_model::*;
 
-// process_refresh_obligation
-
 pub fn refresh_obligation(
-    // program_id: &Pubkey,
     enhanced_obligation: &Enhanced<Obligation>,
     all_reserves: &HashMap<Pubkey, Enhanced<Reserve>>,
     tokens_oracle: &HashMap<Pubkey, OracleData>,

@@ -1,5 +1,4 @@
-use log::{info, trace, warn};
-use log::{Level, Metadata, Record};
+use log::{Metadata, Record};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Logger {
@@ -7,7 +6,7 @@ pub struct Logger {
 }
 
 impl log::Log for Logger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
+    fn enabled(&self, _metadata: &Metadata) -> bool {
         // metadata.level() <= Level::Info
         true
     }

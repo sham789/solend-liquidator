@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::{Add, Div, Mul};
+use std::ops::{Div, Mul};
 use std::sync::Arc;
 
 use hyper::Body;
@@ -23,10 +23,9 @@ use {
 };
 
 use either::Either;
-use futures_retry::{FutureFactory, FutureRetry, RetryPolicy};
+use futures_retry::{FutureFactory, FutureRetry};
 use parking_lot::{Mutex, RwLock};
 
-use log::Log;
 use pyth_sdk_solana;
 use solana_account_decoder::UiAccountEncoding;
 use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcSendTransactionConfig};
@@ -36,23 +35,19 @@ use solana_program::instruction::Instruction;
 use solana_sdk::account::create_is_signer_account_infos;
 use solana_sdk::commitment_config::CommitmentLevel;
 
-use solend_program::math::{Decimal, Rate};
-use solend_program::state::{Obligation, ObligationCollateral, ObligationLiquidity, Reserve};
+use solend_program::math::Decimal;
+use solend_program::state::{Obligation, Reserve};
 
 use spl_associated_token_account::get_associated_token_address;
 
 use switchboard_program::AggregatorState;
-use uint::construct_uint;
-
-use crate::binding;
-use crate::log::Logger;
-use crate::model::{self, Market, SolendConfig};
-use crate::performance::PerformanceMeter;
-use crate::utils::body_to_string;
 
 use crate::client_model::*;
 use crate::constants::*;
 use crate::helpers::*;
+use crate::log::Logger;
+use crate::model::{self, Market, SolendConfig};
+use crate::utils::body_to_string;
 
 pub struct Client {
     client: HyperClient<HttpsConnector<hyper::client::HttpConnector>>,
@@ -487,7 +482,7 @@ impl Client {
 
                 let transaction: &'static _ = Box::leak(Box::new(transaction.clone()));
 
-                let r = rpc_client
+                let _r = rpc_client
                     .send_transaction_with_config(
                         transaction,
                         RpcSendTransactionConfig {

@@ -1,56 +1,16 @@
-use std::collections::{HashMap, HashSet};
-use std::ops::{Add, Div, Mul};
 use std::sync::Arc;
 
-use hyper::Body;
+use solana_sdk::signature::Signer;
 
-use hyper::{Client as HyperClient, Method, Request};
-use hyper_tls::HttpsConnector;
+use parking_lot::RwLock;
 
-use async_trait::async_trait;
-use borsh::BorshDeserialize;
+use solend_program::math::Decimal;
 
-use {
-    solana_client::nonblocking::rpc_client::RpcClient,
-    solana_client::rpc_config::RpcAccountInfoConfig,
-    solana_program::{program_pack::Pack, pubkey::Pubkey},
-    solana_sdk::{
-        commitment_config::CommitmentConfig,
-        signature::{Keypair, Signer},
-        transaction::Transaction,
-    },
-    std::str::FromStr,
-};
+use crate::performance::{PerformanceMeter, Setting};
 
-use either::Either;
-use futures_retry::{FutureFactory, FutureRetry, RetryPolicy};
-use parking_lot::{Mutex, RwLock};
-
-use log::Log;
-use pyth_sdk_solana;
-use solana_account_decoder::UiAccountEncoding;
-use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcSendTransactionConfig};
-use solana_client::rpc_filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
-
-use solana_program::instruction::Instruction;
-use solana_sdk::account::create_is_signer_account_infos;
-use solana_sdk::commitment_config::CommitmentLevel;
-
-use solend_program::math::{Decimal, Rate};
-use solend_program::state::{Obligation, ObligationCollateral, ObligationLiquidity, Reserve};
-
-use spl_associated_token_account::get_associated_token_address;
-
-use switchboard_program::AggregatorState;
-use uint::construct_uint;
-
-use crate::log::Logger;
-use crate::model::{Market, SolendConfig};
-use crate::performance::PerformanceMeter;
-use crate::utils::body_to_string;
 use crate::binding::*;
-use crate::client_model::*;
 use crate::client::{self, Client, MarketsCapsule};
+use crate::client_model::*;
 
 pub async fn process_markets(
     client: &'static Client,
@@ -59,7 +19,7 @@ pub async fn process_markets(
     let markets_list = client.solend_config().unwrap();
     let mut handles = vec![];
 
-    let mut meter = PerformanceMeter::new();
+    let mut meter = PerformanceMeter::new(Setting::Ms);
     meter.add_point("before capsule initialization");
 
     for current_market in markets_list {
@@ -100,7 +60,7 @@ pub async fn process_markets(
                 let lending_market = lending_market.clone();
 
                 let h = tokio::spawn(async move {
-                    let mut meter = PerformanceMeter::new();
+                    let mut meter = PerformanceMeter::new(Setting::Ms);
                     meter.add_point("before obl read");
 
                     let r_obligation = obligation.read().clone();
@@ -129,12 +89,8 @@ pub async fn process_markets(
 
                     meter.add_point("before refresh obligation");
 
-                    let r = refresh_obligation(
-                        &r_obligation,
-                        &*r_reserves,
-                        &*r_oracle_data,
-                        &clock,
-                    );
+                    let r =
+                        refresh_obligation(&r_obligation, &*r_reserves, &*r_oracle_data, &clock);
 
                     if r.is_err() {
                         return None;
@@ -239,7 +195,7 @@ pub async fn process_markets(
                 }
 
                 let values = r.unwrap();
-                let (selected_deposit, selected_borrow, r_obligation, i, lending_market) = values;
+                let (selected_deposit, selected_borrow, r_obligation, _i, lending_market) = values;
 
                 Client::get_or_create_account_data(
                     &client.signer().pubkey(),
