@@ -56,3 +56,7 @@ impl Logger {
     //     }
     // }
 }
+
+struct PerformanceLogger {
+    inner: Logger,
+}

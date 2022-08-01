@@ -7,8 +7,8 @@ use hyper::Body;
 use hyper::{Client as HyperClient, Method, Request};
 use hyper_tls::HttpsConnector;
 
-use borsh::BorshDeserialize;
 use async_trait::async_trait;
+use borsh::BorshDeserialize;
 
 use {
     solana_client::nonblocking::rpc_client::RpcClient,
@@ -81,7 +81,7 @@ pub fn get_config(keypair_path: String) -> Config {
         ..solana_cli_config::Config::default()
     };
 
-    let json_rpc_url = String::from("https://polished-patient-brook.solana-mainnet.quiknode.pro/57a057b48182876ac38c7fb2131d8418e0a92f43/");
+    let json_rpc_url = String::from("https://broken-dawn-field.solana-mainnet.quiknode.pro/52908360084c7e0666532c96647b9b239ec5cadf/");
 
     let signer = solana_sdk::signer::keypair::read_keypair_file(cli_config.keypair_path).unwrap();
 
@@ -91,9 +91,6 @@ pub fn get_config(keypair_path: String) -> Config {
             CommitmentConfig::confirmed(),
         ))),
         signer: Box::new(signer),
-        // lending_program_id,
-        // verbose,
-        // dry_run,
     }
 }
 
@@ -311,7 +308,7 @@ impl Client {
     }
 
     pub async fn update_obligations(
-        c_rpc: Arc<RpcClient>,
+        &'static self,
         obligations: Vec<Pubkey>,
     ) -> HashMap<Pubkey, Arc<RwLock<Enhanced<Obligation>>>> {
         let result: Arc<Mutex<HashMap<Pubkey, Arc<RwLock<Enhanced<Obligation>>>>>> =
@@ -320,7 +317,7 @@ impl Client {
         let mut handles = vec![];
 
         for obligation_pubkey in obligations {
-            let c_rpc = Arc::clone(&c_rpc);
+            let c_rpc = Arc::clone(&self.config.rpc_client);
             let obligation_pubkey = obligation_pubkey.clone();
             let result = Arc::clone(&result);
 
@@ -998,7 +995,7 @@ pub mod binding {
             let token_oracle = tokens_oracle.get(&liquidity.borrow_reserve);
 
             if token_oracle.is_none() {
-                println!("BORROW: oracle price not discovered for: {:?}", liquidity);
+                // println!("BORROW: oracle price not discovered for: {:?}", liquidity);
                 return Err(LendingError::InvalidAccountInput.into());
             }
 
@@ -1152,12 +1149,14 @@ async fn get_wallet_token_data(
     }
 }
 
-pub async fn empty_future() -> usize { 0usize }
-
+pub async fn empty_future() -> usize {
+    0usize
+}
 
 #[async_trait]
 trait UpdateableMarket {
     async fn update_market_data(&mut self, client: &'static Client);
+    async fn update_distinct_obligation(&mut self, client: &'static Client, obligation: Pubkey);
 }
 
 #[derive(Default, Clone, Debug)]
@@ -1167,12 +1166,21 @@ struct MarketReservesRetriever {
     pub reserves: Arc<RwLock<HashMap<Pubkey, Enhanced<Reserve>>>>,
     lending_market: String,
     input_reserves: Option<&'static Vec<model::Resef>>,
+    initialized: bool,
 }
 
 #[async_trait]
 impl UpdateableMarket for MarketReservesRetriever {
     async fn update_market_data(&mut self, client: &'static Client) {
-        let all_obligations = client.get_obligations(self.lending_market.as_str()).await;
+        let all_obligations = if !self.initialized {
+            client.get_obligations(self.lending_market.as_str()).await
+        } else {
+            let obligation_pubkeys: Vec<Pubkey> =
+                self.obligations.keys().into_iter().map(|x| *x).collect();
+            client.update_obligations(obligation_pubkeys).await
+        };
+        self.initialized = true;
+
         let reserves = client.get_reserves(self.lending_market.as_str()).await;
 
         let oracle_data = client
@@ -1180,14 +1188,26 @@ impl UpdateableMarket for MarketReservesRetriever {
             .await;
 
         self.obligations = all_obligations;
+        self.reserves = Arc::new(RwLock::new(reserves));
+        self.oracle_data = Arc::new(RwLock::new(oracle_data));
+    }
 
+    async fn update_distinct_obligation(&mut self, client: &'static Client, obligation: Pubkey) {
+        let updated_obligation = client
+            .get_obligation(Either::Right(obligation.clone()))
+            .await
+            .unwrap();
+
+        self.obligations
+            .insert(obligation, Arc::new(RwLock::new(updated_obligation)));
     }
 }
 
 impl MarketReservesRetriever {
-    pub fn new(lending_market: String) -> Self {
+    pub fn new(lending_market: String, input_reserves: &'static Vec<model::Resef>) -> Self {
         Self {
             lending_market,
+            input_reserves: Some(input_reserves),
             ..Self::default()
         }
     }
@@ -1200,73 +1220,106 @@ struct MarketsCapsule {
     client: Option<&'static Client>,
 }
 
-
 impl MarketsCapsule {
-    pub fn new(
-        client: &'static Client,
-    ) -> Self {
-        Self { 
+    pub fn new(client: &'static Client) -> Self {
+        Self {
             client: Some(client),
             ..Default::default()
         }
     }
 
-    pub async fn update_distinct_market(&mut self, market: &str) {
-        match self.markets.get_mut(market) {
+    pub async fn update_distinct_obligation(&mut self, market: String, obligation: Pubkey) {
+        match self.markets.get_mut(&market) {
             Some(target) => {
-                target.update_market_data(self.client.unwrap()).await;
-            },
+                target
+                    .update_distinct_obligation(self.client.unwrap(), obligation)
+                    .await;
+            }
             _ => {}
         }
     }
 
-    pub fn read_for(&self, market: &str) -> Option<&Box<MarketReservesRetriever>> {
-        self.markets.get(market)
+    pub async fn update_initially(
+        &mut self,
+        market: String,
+        input_reserves: &'static Vec<model::Resef>,
+    ) {
+        self.markets.insert(
+            market.clone(),
+            Box::new(MarketReservesRetriever::new(market, input_reserves)),
+        );
+    }
+
+    pub async fn update_distinct_market(&mut self, market: String) {
+        match self.markets.get_mut(&market) {
+            Some(target) => {
+                target.update_market_data(self.client.unwrap()).await;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn read_for(self, market: String) -> Box<MarketReservesRetriever> {
+        self.markets.get(&market).unwrap().clone()
     }
 }
-
-
 
 async fn process_markets(client: &'static Client, markets_capsule: Arc<RwLock<MarketsCapsule>>) {
     let markets_list = client.solend_cfg.unwrap();
     let mut handles = vec![];
 
+    let mut meter = PerformanceMeter::new();
+    meter.add_point("before capsule initialization");
+
+    for current_market in markets_list {
+        markets_capsule
+            .write()
+            .update_initially(
+                current_market.address.clone(),
+                Box::leak(Box::new(current_market.reserves.clone())),
+            )
+            .await;
+    }
+
+    meter.add_point("after capsule initialization / before markets update");
+
     for current_market in markets_list {
         let lending_market = current_market.address.clone();
 
-        let c_markets_capsule = Arc::clone(&markets_capsule);
+        // let c_markets_capsule = Arc::clone(&markets_capsule);
+
+        markets_capsule
+            .write()
+            .update_distinct_market(current_market.address.clone())
+            .await;
+
+        let r_markets_capsule = markets_capsule.read().clone();
+        let markets = r_markets_capsule.read_for(lending_market.clone());
 
         let h = tokio::spawn(async move {
-
-            let r_markets_capsule = c_markets_capsule.read();
-            let markets = r_markets_capsule.read_for(lending_market.as_str()).unwrap();
-
-            let (oracle_data, all_obligations, reserves) = (
-                &markets.oracle_data,
-                &markets.obligations,
-                &markets.reserves
-            );
+            let (oracle_data, all_obligations, reserves) =
+                (markets.oracle_data, markets.obligations, markets.reserves);
 
             let mut inner_handles = vec![];
 
             for (i, raw_obligation) in all_obligations {
-                // let c_client = Arc::clone(&c_client);
-
-                let obligation = Arc::clone(raw_obligation);
+                let obligation = Arc::clone(&raw_obligation);
                 let oracle_data = Arc::clone(&oracle_data);
                 let reserves = Arc::clone(&reserves);
                 let lending_market = lending_market.clone();
 
                 let h = tokio::spawn(async move {
+
+                    let mut meter = PerformanceMeter::new();
+                    meter.add_point("before obl read");
+
                     let r_obligation = obligation.read().clone();
 
+                    meter.add_point("before get slot");
                     let slot = client.config.rpc_client.get_slot().await.unwrap();
-                    let block_time = client
-                        .config
-                        .rpc_client
-                        .get_block_time(slot)
-                        .await
-                        .unwrap();
+                    meter.add_point("before get block time");
+                    let block_time = client.config.rpc_client.get_block_time(slot).await.unwrap();
+                    meter.add_point("before get epoch info");
                     let epoch_info = client.config.rpc_client.get_epoch_info().await.unwrap();
 
                     let clock = solana_sdk::clock::Clock {
@@ -1283,14 +1336,21 @@ async fn process_markets(client: &'static Client, markets_capsule: Arc<RwLock<Ma
 
                     let r_reserves = reserves.read();
                     let r_oracle_data = oracle_data.read();
-                    let r =
-                        binding::refresh_obligation(&r_obligation, &*r_reserves, &*r_oracle_data, &clock);
+
+                    meter.add_point("before refresh obligation");
+
+                    let r = binding::refresh_obligation(
+                        &r_obligation,
+                        &*r_reserves,
+                        &*r_oracle_data,
+                        &clock,
+                    );
 
                     if r.is_err() {
                         return None;
                     }
 
-                    let (refreshed_obligation, deposits, borrows) = r.as_ref().unwrap();
+                    let (refreshed_obligation, deposits, borrows) = r.unwrap();
 
                     let (borrowed_value, unhealthy_borrow_value) = (
                         refreshed_obligation.borrowed_value.clone(),
@@ -1322,7 +1382,7 @@ async fn process_markets(client: &'static Client, markets_capsule: Arc<RwLock<Ma
 
                     // select repay token that has the highest market value
                     let selected_borrow = {
-                        let mut v: Option<&Borrow> = None;
+                        let mut v: Option<Borrow> = None;
                         for borrow in borrows {
                             // if v.is_none() || deposit.market_value >= v.unwrap().market_value
                             match v {
@@ -1339,7 +1399,7 @@ async fn process_markets(client: &'static Client, markets_capsule: Arc<RwLock<Ma
 
                     // select the withdrawal collateral token with the highest market value
                     let selected_deposit = {
-                        let mut v: Option<&Deposit> = None;
+                        let mut v: Option<Deposit> = None;
                         for deposit in deposits {
                             // if v.is_none() || deposit.market_value >= v.unwrap().market_value
                             match v {
@@ -1367,16 +1427,21 @@ async fn process_markets(client: &'static Client, markets_capsule: Arc<RwLock<Ma
                         r_obligation.pubkey.to_string()
                     );
                     println!("obligation: {:?}", r_obligation.inner);
+                    meter.measure();
 
-                    Some(
-                        (selected_deposit.clone(), selected_borrow.clone(), r_obligation, i, lending_market)
-                    )
-
+                    Some((
+                        selected_deposit.clone(),
+                        selected_borrow.clone(),
+                        r_obligation,
+                        i,
+                        lending_market,
+                    ))
                 });
 
                 inner_handles.push(h);
             }
 
+            let mut update_required_obligations = vec![];
             for inner_h in inner_handles {
                 let r = inner_h.await.unwrap();
                 if r.is_none() {
@@ -1392,7 +1457,8 @@ async fn process_markets(client: &'static Client, markets_capsule: Arc<RwLock<Ma
                     &selected_borrow.mint_address,
                     &client.config.rpc_client,
                     &client.config.signer,
-                ).await;
+                )
+                .await;
 
                 let retrieved_wallet_data = get_wallet_token_data(
                     &client,
@@ -1421,27 +1487,31 @@ async fn process_markets(client: &'static Client, markets_capsule: Arc<RwLock<Ma
                     .await;
 
                 if liquidation_result.is_ok() {
-                    // let markets = c_markets_capsule.read().read_for(lending_market.as_str()).unwrap();
-
-                    // let updated_obligation = client
-                    //     .get_obligation(Either::Right(r_obligation.pubkey))
-                    //     .await
-                    //     .unwrap();
-
-                    // let obligation = markets.obligations.get(&r_obligation.pubkey).unwrap();
-
-                    // let mut w_obligation = obligation.write();
-                    // *w_obligation = updated_obligation;
+                    update_required_obligations.push((lending_market, r_obligation.pubkey));
                 }
             }
+
+            return update_required_obligations;
         });
 
         handles.push(h);
     }
 
+    meter.add_point("before main calc");
+
     for h in handles {
-        h.await;
+        let updated_to_obligations = h.await.unwrap();
+
+        for (lending_market, obligation_pubkey) in updated_to_obligations {
+            let c_markets_capsule = Arc::clone(&markets_capsule);
+            c_markets_capsule
+                .write()
+                .update_distinct_obligation(lending_market, obligation_pubkey)
+                .await;
+        }
     }
+
+    meter.measure();
 }
 
 pub async fn run_eternal_liquidator(keypair_path: String) {
@@ -1453,11 +1523,12 @@ pub async fn run_eternal_liquidator(keypair_path: String) {
     solend_client.solend_cfg = Some(solend_cfg);
 
     let solend_client: &'static _ = Box::leak(Box::new(solend_client));
-    let markets_capsule: &'static _ = Box::leak(Box::new(MarketsCapsule::new(solend_client)));
+    let markets_capsule = Arc::new(RwLock::new(MarketsCapsule::new(solend_client)));
 
-    // loop {
-    //     process_markets(solend_client, markets_capsule).await;
-    // }
+    loop {
+        let markets_capsule = Arc::clone(&markets_capsule);
+        process_markets(solend_client, markets_capsule).await;
+    }
 }
 
 pub async fn run_liquidator_iter(keypair_path: String) {
@@ -1469,9 +1540,9 @@ pub async fn run_liquidator_iter(keypair_path: String) {
     solend_client.solend_cfg = Some(solend_cfg);
 
     let solend_client: &'static _ = Box::leak(Box::new(solend_client));
-    let markets_capsule: &'static _ = Box::leak(Box::new(MarketsCapsule::new(solend_client)));
+    let markets_capsule = Arc::new(RwLock::new(MarketsCapsule::new(solend_client)));
 
-    // process_markets(solend_client, markets_capsule).await;
+    process_markets(solend_client, markets_capsule).await;
 }
 
 #[cfg(test)]
@@ -1481,216 +1552,5 @@ mod tests {
     #[tokio::test]
     async fn test_process_market_iter() {
         run_liquidator_iter(String::from("./private/liquidator_main.json")).await;
-    }
-
-    #[tokio::test]
-    async fn test_calculate_refresh_obligation() {
-        // TODO NEXT 9fGaP5fHsCAt7J1PK97kbXTPYjG6UiDGBw1VT6FSCnr3
-
-        // {
-        //     let obligation_path = String::from("./fixtures/calculate_refreshed_obligation_9zKg44fEvFtaYjm434Jphq3Zcri59i4Lcv3W9xGWKkrS");
-
-        //     let data = tokio::fs::read(obligation_path).await.unwrap();
-        //     let obligation_fixture: fixtures::CalculateRefreshedObligationFixture =
-        //         serde_json::from_slice(&data).unwrap();
-
-        //     // println!("obligation_fixture: {:?}", obligation_fixture);
-
-        //     let arguments = obligation_fixture.decode();
-        //     let refreshed_obligation = calculate_refreshed_obligation(
-        //         &Enhanced {
-        //             inner: arguments.0,
-        //             pubkey: Pubkey::from_str("9zKg44fEvFtaYjm434Jphq3Zcri59i4Lcv3W9xGWKkrS")
-        //                 .unwrap(),
-        //         },
-        //         &arguments.1,
-        //         &arguments.2,
-        //     )
-        //     .await
-        //     .unwrap();
-
-        //     // let decimals = 1e18 as f64;
-        //     println!("refreshed_obligation: {:?}", refreshed_obligation);
-        //     println!(
-        //         "refreshed_obligation.borrowed_value: {:?}",
-        //         refreshed_obligation.borrowed_value.as_u128()
-        //     );
-        //     println!(
-        //         "refreshed_obligation.liquidation_limit: {:?}",
-        //         refreshed_obligation.unhealthy_borrow_value.as_u128()
-        //     );
-
-        //     // let borrowed_value_real = 749912099531240318310u128;
-        //     // let unhealthy_borrow_real = 849493781460828959681u128;
-        //     // println!("unhealthy_borrow_real: {:?}", unhealthy_borrow_real);
-
-        //     println!("borrowed_value_real: {:?}", 750);
-        //     println!("unhealthy_borrow_real: {:?}", 849);
-
-        //     // assert_eq!(
-        //     //     refreshed_obligation.borrowed_value.as_u128(),
-        //     //     borrowed_value_real
-        //     // );
-        //     // assert_eq!(
-        //     //     refreshed_obligation.unhealthy_borrow_value.as_u128(),
-        //     //     unhealthy_borrow_real
-        //     // );
-        // }
-        // {
-        //     let obligation_path = String::from("./fixtures/calculate_refreshed_obligation_9fGaP5fHsCAt7J1PK97kbXTPYjG6UiDGBw1VT6FSCnr3");
-
-        //     let data = tokio::fs::read(obligation_path).await.unwrap();
-        //     let obligation_fixture: fixtures::CalculateRefreshedObligationFixture =
-        //         serde_json::from_slice(&data).unwrap();
-
-        //     // println!("obligation_fixture: {:?}", obligation_fixture);
-
-        //     let arguments = obligation_fixture.decode();
-        //     let refreshed_obligation = calculate_refreshed_obligation(
-        //         &Enhanced {
-        //             inner: arguments.0,
-        //             pubkey: Pubkey::from_str("9fGaP5fHsCAt7J1PK97kbXTPYjG6UiDGBw1VT6FSCnr3").unwrap(),
-        //         },
-        //         &arguments.1,
-        //         &arguments.2,
-        //     )
-        //     .await
-        //     .unwrap();
-
-        //     let decimals = 1e8 as f64;
-        //     println!("refreshed_obligation: {:?}", refreshed_obligation);
-        //     println!("refreshed_obligation.borrowed_value: {:?}", refreshed_obligation.borrowed_value.as_u128() as f64 / decimals);
-        //     println!("refreshed_obligation.liquidation_limit: {:?}", refreshed_obligation.unhealthy_borrow_value.as_u128() as f64 / decimals);
-
-        //     // let borrowed_value_real = 749209978243u128;
-        //     // let unhealthy_borrow_real = 849493781460u128;
-        //     // println!("unhealthy_borrow_real: {:?}", unhealthy_borrow_real);
-
-        //     // assert_eq!(refreshed_obligation.borrowed_value.as_u128(), borrowed_value_real);
-        //     // assert_eq!(refreshed_obligation.unhealthy_borrow_value.as_u128(), unhealthy_borrow_real);
-        // }
-
-        // TODO CORRUPTED POOL: 7TbgkdrixnAV1X6uJP3JwcmriFtf3WLs9PMggMP1rgtQ
-        // {
-        //     let obligation_path = String::from("./fixtures/calculate_refreshed_obligation_7TbgkdrixnAV1X6uJP3JwcmriFtf3WLs9PMggMP1rgtQ");
-
-        //     let data = tokio::fs::read(obligation_path).await.unwrap();
-        //     let obligation_fixture: fixtures::CalculateRefreshedObligationFixture =
-        //         serde_json::from_slice(&data).unwrap();
-
-        //     // println!("obligation_fixture: {:?}", obligation_fixture);
-
-        //     let arguments = obligation_fixture.decode();
-        //     let refreshed_obligation = calculate_refreshed_obligation(
-        //         &Enhanced {
-        //             inner: arguments.0,
-        //             pubkey: Pubkey::from_str("7TbgkdrixnAV1X6uJP3JwcmriFtf3WLs9PMggMP1rgtQ")
-        //                 .unwrap(),
-        //         },
-        //         &arguments.1,
-        //         &arguments.2,
-        //     )
-        //     .await
-        //     .unwrap();
-
-        //     let decimals = 1e8 as f64;
-        //     println!("refreshed_obligation: {:?}", refreshed_obligation);
-        //     println!(
-        //         "refreshed_obligation.borrowed_value: {:?}",
-        //         refreshed_obligation.borrowed_value.as_u128() as f64 / decimals
-        //     );
-        //     println!(
-        //         "refreshed_obligation.liquidation_limit: {:?}",
-        //         refreshed_obligation.unhealthy_borrow_value.as_u128() as f64 / decimals
-        //     );
-
-        //     // let borrowed_value_real = 749209978243u128;
-        //     // let unhealthy_borrow_real = 849493781460u128;
-        //     // println!("unhealthy_borrow_real: {:?}", unhealthy_borrow_real);
-
-        //     // assert_eq!(refreshed_obligation.borrowed_value.as_u128(), borrowed_value_real);
-        //     // assert_eq!(refreshed_obligation.unhealthy_borrow_value.as_u128(), unhealthy_borrow_real);
-        // }
-        // {
-        //     let obligation_path = String::from("./fixtures/calculate_refreshed_obligation_F9w8e3VxJDqmgn9PjV2MKaBuEsBtY5E4QAuixCRFoZr1");
-
-        //     let data = tokio::fs::read(obligation_path).await.unwrap();
-        //     let obligation_fixture: fixtures::CalculateRefreshedObligationFixture =
-        //         serde_json::from_slice(&data).unwrap();
-
-        //     // println!("obligation_fixture: {:?}", obligation_fixture);
-
-        //     let clock = solana_sdk::clock::Clock::default();
-        //     let arguments = obligation_fixture.decode();
-        //     let (refreshed_obligation, _, _) = binding::refresh_obligation(
-        //         &Enhanced {
-        //             inner: arguments.0,
-        //             pubkey: Pubkey::from_str("F9w8e3VxJDqmgn9PjV2MKaBuEsBtY5E4QAuixCRFoZr1")
-        //                 .unwrap(),
-        //         },
-        //         &arguments.1,
-        //         &arguments.2,
-        //         &clock,
-        //     )
-        //     .unwrap();
-
-        //     // let decimals = 1e8 as f64;
-        //     println!("refreshed_obligation: {:?}", refreshed_obligation);
-        //     println!(
-        //         "refreshed_obligation.borrowed_value: {:?}",
-        //         refreshed_obligation.borrowed_value
-        //     );
-        //     println!(
-        //         "refreshed_obligation.liquidation_limit: {:?}",
-        //         refreshed_obligation.unhealthy_borrow_value
-        //     );
-
-        //     // let borrowed_value_real = 749209978243u128;
-        //     // let unhealthy_borrow_real = 849493781460u128;
-        //     // println!("unhealthy_borrow_real: {:?}", unhealthy_borrow_real);
-
-        //     // assert_eq!(refreshed_obligation.borrowed_value.as_u128(), borrowed_value_real);
-        //     // assert_eq!(refreshed_obligation.unhealthy_borrow_value.as_u128(), unhealthy_borrow_real);
-        // }
-        // {
-        //     let obligation_path = String::from("./fixtures/calculate_refreshed_obligation_9GhDG8rv36aZvPzDS17pAwPBoepoMBMszLQqdUVYLu6T");
-
-        //     let data = tokio::fs::read(obligation_path).await.unwrap();
-        //     let obligation_fixture: fixtures::CalculateRefreshedObligationFixture =
-        //         serde_json::from_slice(&data).unwrap();
-
-        //     // println!("obligation_fixture: {:?}", obligation_fixture);
-
-        //     let arguments = obligation_fixture.decode();
-        //     let refreshed_obligation = calculate_refreshed_obligation(
-        //         &Enhanced {
-        //             inner: arguments.0,
-        //             pubkey: Pubkey::from_str("9GhDG8rv36aZvPzDS17pAwPBoepoMBMszLQqdUVYLu6T")
-        //                 .unwrap(),
-        //         },
-        //         &arguments.1,
-        //         &arguments.2,
-        //     )
-        //     .await
-        //     .unwrap();
-
-        //     // let decimals = 1e8 as f64;
-        //     println!("refreshed_obligation: {:?}", refreshed_obligation);
-        //     println!(
-        //         "refreshed_obligation.borrowed_value: {:?}",
-        //         refreshed_obligation.borrowed_value.as_u128()
-        //     );
-        //     println!(
-        //         "refreshed_obligation.liquidation_limit: {:?}",
-        //         refreshed_obligation.unhealthy_borrow_value.as_u128()
-        //     );
-
-        //     // let borrowed_value_real = 749209978243u128;
-        //     // let unhealthy_borrow_real = 849493781460u128;
-        //     // println!("unhealthy_borrow_real: {:?}", unhealthy_borrow_real);
-
-        //     // assert_eq!(refreshed_obligation.borrowed_value.as_u128(), borrowed_value_real);
-        //     // assert_eq!(refreshed_obligation.unhealthy_borrow_value.as_u128(), unhealthy_borrow_real);
-        // }
     }
 }
