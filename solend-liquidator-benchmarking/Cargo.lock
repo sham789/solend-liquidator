@@ -3818,6 +3818,7 @@ dependencies = [
  "log",
  "parking_lot 0.12.1",
  "pyth-sdk-solana",
+ "rayon",
  "serde",
  "serde_derive",
  "serde_json",

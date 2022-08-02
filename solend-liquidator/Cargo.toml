@@ -38,4 +38,5 @@ log = "0.4.17"
 clap = { version = "3.2.14", features = ["derive"] }
 parking_lot = "0.12.1"
 dashmap = "5.3.4"
-
+crossbeam = "0.8.2"
+rayon = "1.5.3"

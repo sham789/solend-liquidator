@@ -1,51 +1,69 @@
 use std::sync::Arc;
 
+use either::Either;
 use solana_sdk::signature::Signer;
 
-use parking_lot::RwLock;
+use parking_lot::{FairMutex, RwLock};
 
 use solend_program::math::Decimal;
+// use rayon::prelude::*;
 
 use crate::performance::{PerformanceMeter, Setting};
 
 use crate::binding::*;
 use crate::client::{self, Client, MarketsCapsule};
 use crate::client_model::*;
+use rayon::prelude::*;
 
 pub async fn process_markets(
     client: &'static Client,
     markets_capsule: Arc<RwLock<MarketsCapsule>>,
 ) {
     let markets_list = client.solend_config().unwrap();
-    let mut handles = vec![];
 
     let mut meter = PerformanceMeter::new(Setting::Ms);
-    meter.add_point("before capsule initialization");
-
-    for current_market in markets_list {
-        markets_capsule
-            .write()
-            .update_initially(
-                current_market.address.clone(),
-                Box::leak(Box::new(current_market.reserves.clone())),
-            )
-            .await;
-    }
 
     meter.add_point("after capsule initialization / before markets update");
+    println!("markets len: {:?}", markets_list.len());
 
+    // fetch market data for update
+    let mut handles = vec![];
+    for current_market in markets_list {
+        let markets_capsule = Arc::clone(&markets_capsule);
+        let market = current_market.address.clone();
+
+        let h = tokio::spawn(async move {
+            let data = markets_capsule.read().clone();
+
+            (data.fetch_market_data_for(market.clone()).await, market)
+        });
+        handles.push(h);
+    }
+
+    // persist market data
+    let mut w_handles = vec![];
+    for h in handles {
+        let (market_data, market) = h.await.unwrap();
+
+        let markets_capsule = Arc::clone(&markets_capsule);
+
+        let w_h = tokio::spawn(async move {
+            let mut w = markets_capsule.write();
+            w.update_market_data_for(market, market_data);
+        });
+        w_handles.push(w_h);
+    }
+
+    for w_h in w_handles {
+        w_h.await.unwrap();
+    }
+
+    let mut handles = vec![];
     for current_market in markets_list {
         let lending_market = current_market.address.clone();
-
-        // let c_markets_capsule = Arc::clone(&markets_capsule);
-
-        markets_capsule
-            .write()
-            .update_distinct_market(current_market.address.clone())
-            .await;
-
         let r_markets_capsule = markets_capsule.read().clone();
         let markets = r_markets_capsule.read_for(lending_market.clone());
+        let markets = markets.inner;
 
         let h = tokio::spawn(async move {
             let (oracle_data, all_obligations, reserves) =
@@ -60,43 +78,18 @@ pub async fn process_markets(
                 let lending_market = lending_market.clone();
 
                 let h = tokio::spawn(async move {
-                    let mut meter = PerformanceMeter::new(Setting::Ms);
-                    meter.add_point("before obl read");
-
                     let r_obligation = obligation.read().clone();
-
-                    meter.add_point("before get slot");
-                    let slot = client.rpc_client().get_slot().await.unwrap();
-                    meter.add_point("before get block time");
-                    let block_time = client.rpc_client().get_block_time(slot).await.unwrap();
-                    meter.add_point("before get epoch info");
-                    let epoch_info = client.rpc_client().get_epoch_info().await.unwrap();
-
-                    let clock = solana_sdk::clock::Clock {
-                        // pub slot: u64,
-                        // pub epoch_start_timestamp: i64,
-                        // pub epoch: u64,
-                        // pub leader_schedule_epoch: u64,
-                        // pub unix_timestamp: i64,
-                        slot,
-                        unix_timestamp: block_time,
-                        epoch: epoch_info.epoch,
-                        ..solana_sdk::clock::Clock::default()
-                    };
-
-                    let r_reserves = reserves.read();
-                    let r_oracle_data = oracle_data.read();
-
-                    meter.add_point("before refresh obligation");
+                    let r_reserves = reserves.read().clone();
+                    let r_oracle_data = oracle_data.read().clone();
 
                     let r =
-                        refresh_obligation(&r_obligation, &*r_reserves, &*r_oracle_data, &clock);
-
+                        refresh_obligation(&r_obligation, &r_reserves, &r_oracle_data);
                     if r.is_err() {
+                        tokio::task::yield_now().await;
                         return None;
                     }
 
-                    let (refreshed_obligation, deposits, borrows) = r.unwrap();
+                    let (refreshed_obligation, mut deposits, mut borrows) = r.unwrap();
 
                     let (borrowed_value, unhealthy_borrow_value) = (
                         refreshed_obligation.borrowed_value.clone(),
@@ -107,7 +100,7 @@ pub async fn process_markets(
                         || unhealthy_borrow_value == Decimal::from(0u64)
                         || borrowed_value <= unhealthy_borrow_value
                     {
-                        // println!("do nothing if obligation is healthy");
+                        tokio::task::yield_now().await;
                         return None;
                     }
 
@@ -126,42 +119,16 @@ pub async fn process_markets(
                         borrowed_value,
                     );
 
-                    // select repay token that has the highest market value
-                    let selected_borrow = {
-                        let mut v: Option<Borrow> = None;
-                        for borrow in borrows {
-                            // if v.is_none() || deposit.market_value >= v.unwrap().market_value
-                            match v {
-                                Some(ref real_v) => {
-                                    if borrow.market_value >= real_v.market_value {
-                                        v = Some(borrow);
-                                    }
-                                }
-                                None => v = Some(borrow),
-                            }
-                        }
-                        v
-                    };
+                    deposits
+                        .sort_by(|a, b| a.market_value.partial_cmp(&b.market_value).unwrap());
+                    borrows
+                        .sort_by(|a, b| a.market_value.partial_cmp(&b.market_value).unwrap());
 
-                    // select the withdrawal collateral token with the highest market value
-                    let selected_deposit = {
-                        let mut v: Option<Deposit> = None;
-                        for deposit in deposits {
-                            // if v.is_none() || deposit.market_value >= v.unwrap().market_value
-                            match v {
-                                Some(ref real_v) => {
-                                    if deposit.market_value >= real_v.market_value {
-                                        v = Some(deposit);
-                                    }
-                                }
-                                None => v = Some(deposit),
-                            }
-                        }
-                        v
-                    };
+                    let selected_deposit = deposits.last();
+                    let selected_borrow = borrows.last();
 
                     if selected_deposit.is_none() || selected_borrow.is_none() {
-                        // println!("skip toxic obligations caused by toxic oracle data");
+                        tokio::task::yield_now().await;
                         return None;
                     }
 
@@ -173,7 +140,6 @@ pub async fn process_markets(
                         r_obligation.pubkey.to_string()
                     );
                     println!("obligation: {:?}", r_obligation.inner);
-                    meter.measure();
 
                     Some((
                         selected_deposit.clone(),
@@ -187,57 +153,74 @@ pub async fn process_markets(
                 inner_handles.push(h);
             }
 
-            let mut update_required_obligations = vec![];
+            let mut upd_handles = vec![];
             for inner_h in inner_handles {
                 let r = inner_h.await.unwrap();
-                if r.is_none() {
-                    continue;
-                }
 
-                let values = r.unwrap();
-                let (selected_deposit, selected_borrow, r_obligation, _i, lending_market) = values;
+                let h = tokio::spawn(async move {
+                    if r.is_none() {
+                        tokio::task::yield_now().await;
+                        return None;
+                    }
 
-                Client::get_or_create_account_data(
-                    &client.signer().pubkey(),
-                    &client.signer().pubkey(),
-                    &selected_borrow.mint_address,
-                    &client.rpc_client(),
-                    &client.signer(),
-                )
-                .await;
+                    let values = r.unwrap();
+                    let (selected_deposit, selected_borrow, r_obligation, _i, lending_market) = values;
 
-                let retrieved_wallet_data = client::get_wallet_token_data(
-                    &client,
-                    client.signer().pubkey(),
-                    selected_borrow.mint_address,
-                    selected_borrow.symbol.clone(),
-                )
-                .await
-                .unwrap();
-
-                let u_zero = U256::from(0);
-                if retrieved_wallet_data.balance == u_zero {
-                    continue;
-                } else if retrieved_wallet_data.balance < u_zero {
-                    continue;
-                }
-
-                let liquidation_result = client
-                    .liquidate_and_redeem(
-                        retrieved_wallet_data.balance.as_u64(),
-                        &selected_borrow,
-                        &selected_deposit,
-                        current_market,
-                        &r_obligation,
+                    Client::get_or_create_account_data(
+                        &client.signer().pubkey(),
+                        &client.signer().pubkey(),
+                        &selected_borrow.mint_address,
+                        &client.rpc_client(),
+                        &client.signer(),
                     )
                     .await;
 
-                if liquidation_result.is_ok() {
-                    update_required_obligations.push((lending_market, r_obligation.pubkey));
-                }
+                    let retrieved_wallet_data = client::get_wallet_token_data(
+                        &client,
+                        client.signer().pubkey(),
+                        selected_borrow.mint_address,
+                        selected_borrow.symbol.clone(),
+                    )
+                    .await
+                    .unwrap();
+
+                    let u_zero = U256::from(0);
+                    if retrieved_wallet_data.balance == u_zero {
+                        tokio::task::yield_now().await;
+                        return None;
+                    } else if retrieved_wallet_data.balance < u_zero {
+                        tokio::task::yield_now().await;
+                        return None;
+                    }
+
+                    let liquidation_result = client
+                        .liquidate_and_redeem(
+                            retrieved_wallet_data.balance.as_u64(),
+                            &selected_borrow,
+                            &selected_deposit,
+                            current_market,
+                            &r_obligation,
+                        )
+                        .await;
+
+                    if liquidation_result.is_ok() {
+                        let updated_obligation = client
+                            .get_obligation(Either::Right(r_obligation.pubkey))
+                            .await
+                            .unwrap();
+
+                        Some((lending_market, updated_obligation))
+                    } else {
+                        tokio::task::yield_now().await;
+                        None
+                    }
+                });
+
+                upd_handles.push(h);
             }
 
-            return update_required_obligations;
+            // return update_required_obligations;
+            return upd_handles;
         });
 
         handles.push(h);
@@ -245,16 +228,34 @@ pub async fn process_markets(
 
     meter.add_point("before main calc");
 
+    let mut u_handles = vec![];
     for h in handles {
-        let updated_to_obligations = h.await.unwrap();
+        let update_to_obligations = h.await.unwrap();
 
-        for (lending_market, obligation_pubkey) in updated_to_obligations {
-            let c_markets_capsule = Arc::clone(&markets_capsule);
-            c_markets_capsule
-                .write()
-                .update_distinct_obligation(lending_market, obligation_pubkey)
-                .await;
+        let markets_capsule = Arc::clone(&markets_capsule);
+
+        'i: for h in update_to_obligations {
+            let r = h.await.unwrap();
+            let markets_capsule = Arc::clone(&markets_capsule);
+
+            let h = tokio::spawn(async move {
+
+                if r.is_none() {
+                    tokio::task::yield_now().await;
+                    return;
+                }
+
+                let (lending_market, updated_obligation) = r.unwrap();
+
+                let mut w = markets_capsule.write();
+                w.update_distinct_obligation_for(lending_market, updated_obligation);
+            });
+            u_handles.push(h);
         }
+    }
+
+    for h in u_handles {
+        h.await.unwrap();
     }
 
     meter.measure();
